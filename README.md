@@ -1,95 +1,224 @@
 # Web Load Tests
 
-Репозиторий для авторизованных нагрузочных автотестов веб-сервера команды.
+Репозиторий содержит `k6`-сценарии для авторизованного black-box HTTP load testing веб-сервера команды.
 
-Target по умолчанию:
+Тесты не зависят от backend/framework приложения, контейнера или Ansible. Проект работает только с внешним HTTP-интерфейсом согласованного target.
 
-```text
-http://81.26.176.68:30080/
+## Target
+
+Целевой сервер задается через переменную окружения:
+
+```bash
+TARGET_URL=http://81.26.176.68:30080
 ```
 
-## Назначение
+В `.env` лучше указывать адрес без завершающего `/`, чтобы endpoint'ы корректно склеивались в тестах.
 
-Проект используется для black-box HTTP load testing:
+## Scope
 
-- smoke test;
+Разрешенные сценарии:
+
+- smoke testing;
 - endpoint discovery;
-- baseline load;
-- stress test;
-- spike test;
-- endurance test.
+- baseline load testing;
+- load testing;
+- controlled stress testing;
+- controlled spike testing;
+- endurance testing;
+- сохранение локальных результатов `k6`.
+
+Запрещено использовать проект для неавторизованных атак, обхода rate limit, сокрытия источника трафика, эксплуатации уязвимостей или тестирования сторонних систем.
 
 ## Требования
 
-- Linux host
-- SSH access
-- k6
-- git
+На Linux runner должны быть доступны:
+
+- `git`;
+- `bash`;
+- `k6`.
+
+Проверка установки `k6`:
+
+```bash
+k6 version
+```
 
 ## Быстрый старт
 
 ```bash
 git clone <repo-url>
 cd web-load-tests
+
 cp .env.example .env
 ```
 
-Проверить `.env`:
+Проверь настройки:
 
 ```bash
 TARGET_URL=http://81.26.176.68:30080
+REQUEST_TIMEOUT=5s
+SLEEP_SECONDS=1
+LOAD_ENDPOINTS=/
 ```
 
-Запуск smoke test:
+Дай права на запуск скриптов, если нужно:
+
+```bash
+chmod +x scripts/*.sh
+```
+
+## Конфигурация
+
+Все основные параметры задаются через `.env` или переменные окружения.
+
+Общие параметры:
+
+```bash
+TARGET_URL=http://81.26.176.68:30080
+REQUEST_TIMEOUT=5s
+SLEEP_SECONDS=1
+LOAD_ENDPOINTS=/
+```
+
+`LOAD_ENDPOINTS` поддерживает несколько endpoint'ов через запятую:
+
+```bash
+LOAD_ENDPOINTS=/,/ping,/version
+```
+
+Перед добавлением endpoint'ов в нагрузочные профили сначала запусти discovery и оставь только реально доступные пути.
+
+## Профили
+
+`smoke` проверяет базовую доступность `/` с минимальной нагрузкой.
 
 ```bash
 ./scripts/run-smoke.sh
 ```
 
-Запуск discovery:
+`discovery` аккуратно проверяет типовые endpoint'ы:
+
+```text
+/
+/ping
+/healthz
+/readyz
+/version
+/metrics
+```
+
+Запуск:
 
 ```bash
 ./scripts/run-discovery.sh
 ```
 
-Запуск baseline:
+`baseline` создает умеренную обычную нагрузку.
 
 ```bash
 ./scripts/run-baseline.sh
 ```
 
-## Профили
+`load` создает повышенную нагрузку.
 
-### Smoke
+```bash
+./scripts/run-load.sh
+```
 
-Минимальная проверка доступности.
+`stress` постепенно увеличивает нагрузку для поиска предела устойчивости.
 
-### Discovery
+```bash
+./scripts/run-stress.sh
+```
 
-Проверка типовых endpoint'ов.
+`spike` проверяет реакцию сервера на резкий всплеск нагрузки.
 
-### Baseline
+```bash
+./scripts/run-spike.sh
+```
 
-Умеренная нагрузка.
+`endurance` проверяет стабильность при длительной умеренной нагрузке.
 
-### Load
+```bash
+./scripts/run-endurance.sh
+```
 
-Повышенная нагрузка.
+`stress`, `spike` и `endurance` запускаются только после согласования окна тестирования с командой.
 
-### Stress
+## Рекомендуемый порядок запуска
 
-Постепенное повышение нагрузки для поиска предела устойчивости.
+1. `./scripts/run-smoke.sh`
+2. `./scripts/run-discovery.sh`
+3. обновить `LOAD_ENDPOINTS` в `.env`
+4. `./scripts/run-baseline.sh`
+5. `./scripts/run-load.sh`
+6. `./scripts/run-stress.sh`
+7. `./scripts/run-spike.sh`
+8. `./scripts/run-endurance.sh`
 
-### Spike
+## Результаты
 
-Резкий всплеск нагрузки.
+Скрипты сохраняют `k6` summary в папку `results/`.
 
-### Endurance
+Примеры файлов:
 
-Длительная умеренная нагрузка.
+```text
+results/smoke-20260503-153000.json
+results/baseline-20260503-154500.json
+results/stress-20260503-160000.json
+```
 
-## Важно
+Папка `results/` не коммитится в git.
 
-Проект предназначен только для авторизованного тестирования согласованного веб-сервера команды.
+## Структура проекта
 
-Не использовать против сторонних систем.
+```text
+tests/
+  smoke.js
+  discovery.js
+  baseline.js
+  load.js
+  stress.js
+  spike.js
+  endurance.js
+
+config/
+  endpoints.js
+  thresholds.js
+
+scripts/
+  run-smoke.sh
+  run-discovery.sh
+  run-baseline.sh
+  run-load.sh
+  run-stress.sh
+  run-spike.sh
+  run-endurance.sh
+
+docs/
+  PROJECT_BRIEF.md
+  AGENTS.md
+  TESTING_SCOPE.md
+  LOAD_TEST_PLAN.md
+
+results/
+.env.example
+.gitignore
+README.md
+```
+
+## Что передать blue team
+
+После запуска тестов передай:
+
+- профиль теста;
+- время запуска;
+- `TARGET_URL`;
+- длительность;
+- количество VUs;
+- использованные endpoint'ы;
+- summary из терминала;
+- JSON-файл из `results/`;
+- краткие наблюдения по доступности сервиса.
+
+Blue team дальше сопоставляет результаты с метриками, логами и состоянием инфраструктуры.

@@ -21,3 +21,13 @@ export const stressThresholds = {
   http_req_failed: ['rate<0.20'],
   http_req_duration: ['p(95)<3000'],
 };
+
+export const spikeThresholds = {
+  http_req_failed: ['rate<0.20'],
+  http_req_duration: ['p(95)<3000'],
+};
+
+export const enduranceThresholds = {
+  http_req_failed: ['rate<0.10'],
+  http_req_duration: ['p(95)<2000'],
+};
