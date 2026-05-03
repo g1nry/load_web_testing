@@ -1,22 +1,21 @@
 # Web Load Tests
 
-Репозиторий содержит `k6`-сценарии для авторизованного black-box HTTP load testing веб-сервера команды.
+`k6`-репозиторий для авторизованных black-box HTTP load tests веб-сервера команды.
 
-Тесты не зависят от backend/framework приложения, контейнера или Ansible. Проект работает только с внешним HTTP-интерфейсом согласованного target.
+Проект не требует знания backend/framework, не лезет в контейнеры и не зависит от Ansible. Все тесты работают только через внешний HTTP target, который задается локально перед запуском.
 
-## Target
+## Главное
 
-Целевой сервер задается через переменную окружения:
-
-```bash
-TARGET_URL=http://81.26.176.68:30080
-```
-
-В `.env` лучше указывать адрес без завершающего `/`, чтобы endpoint'ы корректно склеивались в тестах.
+- реальный `TARGET_URL` не хранится в репозитории;
+- все параметры запуска задаются через `.env` или переменные окружения;
+- публичный пример настроек лежит в `.env.example`;
+- результаты сохраняются в `results/`;
+- `.env` и `results/` не коммитятся;
+- тяжелые профили не запускаются пакетно без явного флага.
 
 ## Scope
 
-Разрешенные сценарии:
+Разрешено:
 
 - smoke testing;
 - endpoint discovery;
@@ -25,19 +24,19 @@ TARGET_URL=http://81.26.176.68:30080
 - controlled stress testing;
 - controlled spike testing;
 - endurance testing;
-- сохранение локальных результатов `k6`.
+- сохранение локальных `k6` summary.
 
-Запрещено использовать проект для неавторизованных атак, обхода rate limit, сокрытия источника трафика, эксплуатации уязвимостей или тестирования сторонних систем.
+Запрещено использовать этот проект для неавторизованных атак, обхода rate limit, сокрытия источника трафика, эксплуатации уязвимостей или тестирования сторонних систем.
 
 ## Требования
 
-На Linux runner должны быть доступны:
+На Linux runner должны быть установлены:
 
 - `git`;
 - `bash`;
 - `k6`.
 
-Проверка установки `k6`:
+Проверка:
 
 ```bash
 k6 version
@@ -50,37 +49,34 @@ git clone <repo-url>
 cd web-load-tests
 
 cp .env.example .env
-```
-
-Проверь настройки:
-
-```bash
-TARGET_URL=http://81.26.176.68:30080
-REQUEST_TIMEOUT=5s
-SLEEP_SECONDS=1
-LOAD_ENDPOINTS=/
-```
-
-Дай права на запуск скриптов, если нужно:
-
-```bash
 chmod +x scripts/*.sh
 ```
 
-## Конфигурация
-
-Все основные параметры задаются через `.env` или переменные окружения.
-
-Общие параметры:
+Открой `.env` и замени плейсхолдер на согласованный target:
 
 ```bash
-TARGET_URL=http://81.26.176.68:30080
+TARGET_URL=https://example.internal
+```
+
+Реальный адрес стенда не нужно добавлять в git.
+
+## Основная конфигурация
+
+Минимальный безопасный старт:
+
+```bash
+TARGET_URL=https://example.internal
 REQUEST_TIMEOUT=5s
 SLEEP_SECONDS=1
 LOAD_ENDPOINTS=/
+
+TEST_PROFILES=smoke,discovery,baseline
+ALLOW_HIGH_IMPACT_TESTS=false
 ```
 
-`LOAD_ENDPOINTS` поддерживает несколько endpoint'ов через запятую:
+`TARGET_URL` лучше указывать без завершающего `/`.
+
+`LOAD_ENDPOINTS` поддерживает несколько путей через запятую:
 
 ```bash
 LOAD_ENDPOINTS=/,/ping,/version
@@ -88,15 +84,64 @@ LOAD_ENDPOINTS=/,/ping,/version
 
 Перед добавлением endpoint'ов в нагрузочные профили сначала запусти discovery и оставь только реально доступные пути.
 
-## Профили
+## Пакетный запуск
 
-`smoke` проверяет базовую доступность `/` с минимальной нагрузкой.
+Для обычного запуска используй suite-runner:
+
+```bash
+./scripts/run-suite.sh
+```
+
+Он читает список профилей из `.env`:
+
+```bash
+TEST_PROFILES=smoke,discovery,baseline
+```
+
+Профили `stress`, `spike` и `endurance` считаются high-impact. При пакетном запуске они будут пропущены, пока явно не включен флаг:
+
+```bash
+ALLOW_HIGH_IMPACT_TESTS=true
+```
+
+Пример для согласованного окна расширенного тестирования:
+
+```bash
+TEST_PROFILES=smoke,baseline,load,stress,spike,endurance
+ALLOW_HIGH_IMPACT_TESTS=true
+```
+
+## Запуск одного профиля
+
+Через общий wrapper:
+
+```bash
+./scripts/run-profile.sh smoke
+./scripts/run-profile.sh discovery
+./scripts/run-profile.sh baseline
+./scripts/run-profile.sh load
+./scripts/run-profile.sh stress
+./scripts/run-profile.sh spike
+./scripts/run-profile.sh endurance
+```
+
+Или напрямую:
 
 ```bash
 ./scripts/run-smoke.sh
+./scripts/run-discovery.sh
+./scripts/run-baseline.sh
+./scripts/run-load.sh
+./scripts/run-stress.sh
+./scripts/run-spike.sh
+./scripts/run-endurance.sh
 ```
 
-`discovery` аккуратно проверяет типовые endpoint'ы:
+## Профили
+
+`smoke` — минимальная проверка доступности `/`.
+
+`discovery` — аккуратная проверка типовых endpoint'ов:
 
 ```text
 /
@@ -107,60 +152,32 @@ LOAD_ENDPOINTS=/,/ping,/version
 /metrics
 ```
 
-Запуск:
+`baseline` — умеренная обычная нагрузка.
 
-```bash
-./scripts/run-discovery.sh
-```
+`load` — повышенная нагрузка.
 
-`baseline` создает умеренную обычную нагрузку.
+`stress` — постепенное увеличение нагрузки для поиска предела устойчивости.
 
-```bash
-./scripts/run-baseline.sh
-```
+`spike` — резкий всплеск нагрузки.
 
-`load` создает повышенную нагрузку.
-
-```bash
-./scripts/run-load.sh
-```
-
-`stress` постепенно увеличивает нагрузку для поиска предела устойчивости.
-
-```bash
-./scripts/run-stress.sh
-```
-
-`spike` проверяет реакцию сервера на резкий всплеск нагрузки.
-
-```bash
-./scripts/run-spike.sh
-```
-
-`endurance` проверяет стабильность при длительной умеренной нагрузке.
-
-```bash
-./scripts/run-endurance.sh
-```
+`endurance` — длительная умеренная нагрузка.
 
 `stress`, `spike` и `endurance` запускаются только после согласования окна тестирования с командой.
 
-## Рекомендуемый порядок запуска
+## Рекомендуемый порядок
 
-1. `./scripts/run-smoke.sh`
-2. `./scripts/run-discovery.sh`
-3. обновить `LOAD_ENDPOINTS` в `.env`
-4. `./scripts/run-baseline.sh`
-5. `./scripts/run-load.sh`
-6. `./scripts/run-stress.sh`
-7. `./scripts/run-spike.sh`
-8. `./scripts/run-endurance.sh`
+1. Запустить `smoke`.
+2. Запустить `discovery`.
+3. Обновить `LOAD_ENDPOINTS` в `.env`.
+4. Запустить `baseline`.
+5. Запустить `load`.
+6. По согласованию запустить `stress`, `spike`, `endurance`.
 
 ## Результаты
 
-Скрипты сохраняют `k6` summary в папку `results/`.
+Скрипты сохраняют `k6` summary в `results/`.
 
-Примеры файлов:
+Примеры:
 
 ```text
 results/smoke-20260503-153000.json
@@ -168,9 +185,9 @@ results/baseline-20260503-154500.json
 results/stress-20260503-160000.json
 ```
 
-Папка `results/` не коммитится в git.
+Папка `results/` не коммитится.
 
-## Структура проекта
+## Структура
 
 ```text
 tests/
@@ -194,6 +211,8 @@ scripts/
   run-stress.sh
   run-spike.sh
   run-endurance.sh
+  run-profile.sh
+  run-suite.sh
 
 docs/
   PROJECT_BRIEF.md
@@ -209,7 +228,7 @@ README.md
 
 ## Что передать blue team
 
-После запуска тестов передай:
+После запуска передай:
 
 - профиль теста;
 - время запуска;
