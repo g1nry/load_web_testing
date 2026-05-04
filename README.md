@@ -201,6 +201,8 @@ Suite запускает профили по порядку. Если один �
 ./scripts/run-endurance.sh
 ```
 
+Wrapper-скрипты печатают проектный баннер и запускают `k6` в quiet-режиме, чтобы стандартный баннер Grafana k6 не перебивал вывод.
+
 ## Профили
 
 `smoke` — минимальная проверка доступности `/`.
@@ -344,6 +346,7 @@ scripts/
   run-endurance.sh
   run-profile.sh
   run-suite.sh
+  lib.sh
 
 results/
 .env.example

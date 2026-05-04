@@ -1,17 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mkdir -p results
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "${script_dir}/lib.sh"
 
-if [ -f .env ]; then
-  set -a
-  . ./.env
-  set +a
-fi
-
-timestamp="$(date +%Y%m%d-%H%M%S)"
-result_file="results/load-${timestamp}.json"
-
-k6 run \
-  --summary-export "${result_file}" \
-  tests/load.js
+run_k6_profile "load" "tests/load.js"
