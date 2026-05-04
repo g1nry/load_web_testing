@@ -1,33 +1,35 @@
-export const smokeThresholds = {
-  http_req_failed: ['rate<0.05'],
-  http_req_duration: ['p(95)<1000'],
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+import { buildUrl, getLoadEndpoints, getTargetUrl, pickEndpoint } from '../config/endpoints.js';
+import { spikeThresholds } from '../config/thresholds.js';
+
+const targetUrl = getTargetUrl();
+const endpoints = getLoadEndpoints();
+const requestTimeout = __ENV.REQUEST_TIMEOUT || '5s';
+const sleepSeconds = Number(__ENV.SLEEP_SECONDS || '1');
+
+export const options = {
+  stages: [
+    { duration: __ENV.SPIKE_LOW_DURATION || '1m', target: Number(__ENV.SPIKE_LOW_VUS || '10') },
+    { duration: __ENV.SPIKE_HIGH_DURATION || '1m', target: Number(__ENV.SPIKE_HIGH_VUS || '100') },
+    { duration: __ENV.SPIKE_RECOVERY_DURATION || '2m', target: Number(__ENV.SPIKE_LOW_VUS || '10') },
+    { duration: '30s', target: 0 },
+  ],
+  thresholds: spikeThresholds,
 };
 
-export const discoveryThresholds = {
-  http_req_duration: ['p(95)<3000'],
-};
+export default function () {
+  const endpoint = pickEndpoint(endpoints);
 
-export const baselineThresholds = {
-  http_req_failed: ['rate<0.05'],
-  http_req_duration: ['p(95)<1000'],
-};
+  const response = http.get(buildUrl(targetUrl, endpoint), {
+    timeout: requestTimeout,
+    tags: { endpoint },
+  });
 
-export const loadThresholds = {
-  http_req_failed: ['rate<0.10'],
-  http_req_duration: ['p(95)<2000'],
-};
+  check(response, {
+    'server responded': (res) => res.status > 0,
+    'status is not 5xx': (res) => res.status < 500,
+  });
 
-export const stressThresholds = {
-  http_req_failed: ['rate<0.20'],
-  http_req_duration: ['p(95)<3000'],
-};
-
-export const spikeThresholds = {
-  http_req_failed: ['rate<0.20'],
-  http_req_duration: ['p(95)<3000'],
-};
-
-export const enduranceThresholds = {
-  http_req_failed: ['rate<0.10'],
-  http_req_duration: ['p(95)<2000'],
-};
+  sleep(sleepSeconds);
+}
