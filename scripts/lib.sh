@@ -28,7 +28,7 @@ print_banner() {
 EOF
   printf "%b" "${reset}"
 
-  printf "\n%b authorized black-box HTTP load testing%b\n\n" "${dim}" "${reset}"
+  printf "\n%b Authorized black-box HTTP load testing%b\n\n" "${dim}" "${reset}"
   printf "     execution: local\n"
   printf "        script: %s\n" "${script}"
   printf "        output: -\n"
