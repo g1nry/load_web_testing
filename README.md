@@ -173,6 +173,8 @@ TEST_PROFILES=smoke,baseline,load,stress,spike,endurance
 ALLOW_HIGH_IMPACT_TESTS=true
 ```
 
+Suite запускает профили по порядку. Если один профиль завершился ошибкой, следующие профили все равно будут запущены, а в конце suite вернет non-zero exit code и выведет список упавших профилей.
+
 ## Запуск одного профиля
 
 Через общий wrapper:
