@@ -46,7 +46,7 @@ k6 version
 
 ```bash
 git clone <repo-url>
-cd web-load-tests
+cd load_web_testing
 
 cp .env.example .env
 chmod +x scripts/*.sh
