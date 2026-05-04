@@ -45,7 +45,7 @@ k6 version
 ## Быстрый старт
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/g1nry/load_web_testing.git
 cd load_web_testing
 
 cp .env.example .env
