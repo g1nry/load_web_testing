@@ -134,7 +134,12 @@ profile_duration_seconds() {
       printf "%s\n" "$((steps * (ramp + hold) + ramp_down))"
       ;;
     cpu)
-      duration_to_seconds "${CPU_DURATION:-5m}"
+      local steps ramp hold ramp_down
+      steps="$(capacity_steps_count "${CPU_RATE_STEPS:-${CPU_RATE:-25,50,100,200}}")"
+      ramp="$(duration_to_seconds "${CPU_RAMP_DURATION:-30s}")"
+      hold="$(duration_to_seconds "${CPU_HOLD_DURATION:-1m}")"
+      ramp_down="$(duration_to_seconds "${CPU_RAMP_DOWN_DURATION:-30s}")"
+      printf "%s\n" "$((steps * (ramp + hold) + ramp_down))"
       ;;
     memory)
       duration_to_seconds "${MEMORY_DURATION:-10m}"
@@ -269,6 +274,7 @@ run_k6_profile() {
   expected_duration="$(profile_duration_seconds "${profile}")"
 
   k6 run \
+    --address "127.0.0.1:0" \
     --quiet \
     --summary-export "${result_file}" \
     "${script}" > "${log_file}" 2>&1 &

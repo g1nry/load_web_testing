@@ -197,12 +197,16 @@ THROUGHPUT_MAX_VUS=500
 
 ```bash
 CPU_ENDPOINTS=/
-CPU_RATE=500
-CPU_DURATION=5m
+CPU_RATE_STEPS=25,50,100,200
+CPU_RAMP_DURATION=30s
+CPU_HOLD_DURATION=1m
+CPU_RAMP_DOWN_DURATION=30s
 CPU_PRE_ALLOCATED_VUS=100
 CPU_MAX_VUS=1000
-CPU_NO_CONNECTION_REUSE=true
+CPU_NO_CONNECTION_REUSE=false
 ```
+
+`CPU_NO_CONNECTION_REUSE=true` делает тест гораздо жестче по TCP/NAT и может положить сеть runner'а раньше, чем будет найден CPU-предел сервиса. Включай это только отдельным согласованным прогоном.
 
 ### Memory
 
