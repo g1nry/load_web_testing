@@ -2,21 +2,36 @@ import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { buildUrl, getLoadEndpoints, getTargetUrl, pickEndpoint } from '../config/endpoints.js';
 import { buildSummary } from '../config/report.js';
-import { spikeThresholds } from '../config/thresholds.js';
+import { capacityThresholds } from '../config/thresholds.js';
 
 const targetUrl = getTargetUrl();
 const endpoints = getLoadEndpoints();
 const requestTimeout = __ENV.REQUEST_TIMEOUT || '5s';
 const sleepSeconds = Number(__ENV.SLEEP_SECONDS || '1');
 
+function getCapacityStages() {
+  const stepVus = (__ENV.CAPACITY_STEP_VUS || '5,10,20,40,60,80,100')
+    .split(',')
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+
+  const rampDuration = __ENV.CAPACITY_RAMP_DURATION || '30s';
+  const holdDuration = __ENV.CAPACITY_HOLD_DURATION || '1m';
+  const rampDownDuration = __ENV.CAPACITY_RAMP_DOWN_DURATION || '1m';
+  const stages = [];
+
+  for (const vus of stepVus) {
+    stages.push({ duration: rampDuration, target: vus });
+    stages.push({ duration: holdDuration, target: vus });
+  }
+
+  stages.push({ duration: rampDownDuration, target: 0 });
+  return stages;
+}
+
 export const options = {
-  stages: [
-    { duration: __ENV.SPIKE_LOW_DURATION || '1m', target: Number(__ENV.SPIKE_LOW_VUS || '10') },
-    { duration: __ENV.SPIKE_HIGH_DURATION || '1m', target: Number(__ENV.SPIKE_HIGH_VUS || '100') },
-    { duration: __ENV.SPIKE_RECOVERY_DURATION || '2m', target: Number(__ENV.SPIKE_LOW_VUS || '10') },
-    { duration: '30s', target: 0 },
-  ],
-  thresholds: spikeThresholds,
+  stages: getCapacityStages(),
+  thresholds: capacityThresholds,
 };
 
 export default function () {

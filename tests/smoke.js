@@ -1,6 +1,7 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { getTargetUrl, buildUrl } from '../config/endpoints.js';
+import { buildSummary } from '../config/report.js';
 import { smokeThresholds } from '../config/thresholds.js';
 
 const targetUrl = getTargetUrl();
@@ -23,4 +24,8 @@ export default function () {
   });
 
   sleep(sleepSeconds);
+}
+
+export function handleSummary(data) {
+  return buildSummary(data);
 }

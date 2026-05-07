@@ -25,6 +25,7 @@
 - controlled stress testing;
 - controlled spike testing;
 - endurance testing;
+- controlled capacity / failure-threshold search;
 - сохранение локальных `k6` summary.
 
 Запрещено использовать этот проект для неавторизованных атак, обхода rate limit, сокрытия источника трафика, эксплуатации уязвимостей или тестирования сторонних систем.
@@ -131,8 +132,9 @@ LOAD_ENDPOINTS=/,/ping,/version
 | `REQUEST_TIMEOUT` | Таймаут одного HTTP-запроса |
 | `SLEEP_SECONDS` | Пауза между итерациями виртуального пользователя |
 | `LOAD_ENDPOINTS` | Список endpoint'ов для нагрузочных профилей через запятую |
+| `GRAFANA_DASHBOARD_URL` | Ссылка на dashboard/time range для ручной вставки в Markdown-отчет |
 | `TEST_PROFILES` | Список профилей для `run-suite.sh` через запятую |
-| `ALLOW_HIGH_IMPACT_TESTS` | Разрешает пакетный запуск `stress`, `spike`, `endurance` |
+| `ALLOW_HIGH_IMPACT_TESTS` | Разрешает пакетный запуск `stress`, `spike`, `endurance`, `capacity` |
 
 Профильные переменные:
 
@@ -145,6 +147,7 @@ LOAD_ENDPOINTS=/,/ping,/version
 | `stress` | `STRESS_STAGE_1_VUS`, `STRESS_STAGE_1_DURATION`, `STRESS_STAGE_2_VUS`, `STRESS_STAGE_2_DURATION`, `STRESS_STAGE_3_VUS`, `STRESS_STAGE_3_DURATION`, `STRESS_RAMP_DOWN_DURATION` |
 | `spike` | `SPIKE_LOW_VUS`, `SPIKE_HIGH_VUS`, `SPIKE_LOW_DURATION`, `SPIKE_HIGH_DURATION`, `SPIKE_RECOVERY_DURATION` |
 | `endurance` | `ENDURANCE_VUS`, `ENDURANCE_DURATION` |
+| `capacity` | `CAPACITY_STEP_VUS`, `CAPACITY_RAMP_DURATION`, `CAPACITY_HOLD_DURATION`, `CAPACITY_RAMP_DOWN_DURATION` |
 
 ## Пакетный запуск
 
@@ -160,7 +163,7 @@ LOAD_ENDPOINTS=/,/ping,/version
 TEST_PROFILES=smoke,discovery,baseline
 ```
 
-Профили `stress`, `spike` и `endurance` считаются high-impact. При пакетном запуске они будут пропущены, пока явно не включен флаг:
+Профили `stress`, `spike`, `endurance` и `capacity` считаются high-impact. При пакетном запуске они будут пропущены, пока явно не включен флаг:
 
 ```bash
 ALLOW_HIGH_IMPACT_TESTS=true
@@ -169,7 +172,7 @@ ALLOW_HIGH_IMPACT_TESTS=true
 Пример для согласованного окна расширенного тестирования:
 
 ```bash
-TEST_PROFILES=smoke,baseline,load,stress,spike,endurance
+TEST_PROFILES=smoke,baseline,load,stress,spike,endurance,capacity
 ALLOW_HIGH_IMPACT_TESTS=true
 ```
 
@@ -187,6 +190,7 @@ Suite запускает профили по порядку. Если один �
 ./scripts/run-profile.sh stress
 ./scripts/run-profile.sh spike
 ./scripts/run-profile.sh endurance
+./scripts/run-profile.sh capacity
 ```
 
 Или напрямую:
@@ -199,6 +203,7 @@ Suite запускает профили по порядку. Если один �
 ./scripts/run-stress.sh
 ./scripts/run-spike.sh
 ./scripts/run-endurance.sh
+./scripts/run-capacity.sh
 ```
 
 Wrapper-скрипты печатают проектный баннер и запускают `k6` в quiet-режиме, чтобы стандартный баннер Grafana k6 не перебивал вывод.
@@ -228,7 +233,9 @@ Wrapper-скрипты печатают проектный баннер и за�
 
 `endurance` — длительная умеренная нагрузка.
 
-`stress`, `spike` и `endurance` запускаются только после согласования окна тестирования с командой.
+`capacity` — контролируемый ступенчатый поиск первой нагрузки, на которой нарушаются критерии устойчивости. Используй для оценки диапазона “последняя стабильная нагрузка / первая проблемная нагрузка”, а не для неограниченного краша сервиса.
+
+`stress`, `spike`, `endurance` и `capacity` запускаются только после согласования окна тестирования с командой.
 
 ## Рекомендуемый порядок
 
@@ -239,7 +246,7 @@ Wrapper-скрипты печатают проектный баннер и за�
 5. Обновить `LOAD_ENDPOINTS` в `.env`.
 6. Запустить `baseline`.
 7. Запустить `load`.
-8. По согласованию запустить `stress`, `spike`, `endurance`.
+8. По согласованию запустить `stress`, `spike`, `endurance`, `capacity`.
 
 Команды:
 
@@ -258,6 +265,7 @@ High-impact профили:
 ./scripts/run-profile.sh stress
 ./scripts/run-profile.sh spike
 ./scripts/run-profile.sh endurance
+./scripts/run-profile.sh capacity
 ```
 
 `ALLOW_HIGH_IMPACT_TESTS` проверяется только в `run-suite.sh`. При прямом запуске через `run-profile.sh` ответственность за согласованное окно тестирования остается на операторе.
@@ -265,7 +273,7 @@ High-impact профили:
 Для пакетного high-impact запуска укажи в `.env`:
 
 ```bash
-TEST_PROFILES=smoke,baseline,load,stress,spike,endurance
+TEST_PROFILES=smoke,baseline,load,stress,spike,endurance,capacity
 ALLOW_HIGH_IMPACT_TESTS=true
 ```
 
@@ -277,15 +285,29 @@ ALLOW_HIGH_IMPACT_TESTS=true
 
 ## Результаты
 
-Скрипты сохраняют `k6` summary в `results/`.
+Скрипты сохраняют machine-readable `k6` summary и человекочитаемый Markdown-отчет в `results/`.
 
 Примеры:
 
 ```text
 results/smoke-20260503-153000.json
+results/smoke-20260503-153000.md
 results/baseline-20260503-154500.json
+results/baseline-20260503-154500.md
 results/stress-20260503-160000.json
+results/stress-20260503-160000.md
 ```
+
+Markdown-отчет содержит:
+
+- параметры запуска;
+- RPS, latency, checks, failure rate;
+- объем отправленных/полученных данных;
+- среднюю сетевую нагрузку runner'а в Mbps;
+- статус thresholds;
+- секцию для ручного заполнения server-side метрик из Grafana.
+
+Server-side ресурсы сервиса нужно брать из Grafana/Prometheus за тот же time range: CPU, RAM, network receive/transmit, рестарты контейнера, OOM, 5xx/timeouts.
 
 
 ## Проверка репозитория
@@ -318,7 +340,7 @@ which k6
 
 `HTTP 404` в discovery не всегда ошибка. Discovery специально проверяет типовые endpoint'ы и нужен для выбора рабочих путей в `LOAD_ENDPOINTS`.
 
-Пакетный запуск пропускает `stress`, `spike`, `endurance` — это ожидаемо, если `ALLOW_HIGH_IMPACT_TESTS` не равен `true`.
+Пакетный запуск пропускает `stress`, `spike`, `endurance`, `capacity` — это ожидаемо, если `ALLOW_HIGH_IMPACT_TESTS` не равен `true`.
 
 ## Структура
 
@@ -331,10 +353,12 @@ tests/
   stress.js
   spike.js
   endurance.js
+  capacity.js
 
 config/
   endpoints.js
   thresholds.js
+  report.js
 
 scripts/
   run-smoke.sh
@@ -344,6 +368,7 @@ scripts/
   run-stress.sh
   run-spike.sh
   run-endurance.sh
+  run-capacity.sh
   run-profile.sh
   run-suite.sh
   lib.sh
@@ -368,6 +393,9 @@ README.md
 - использованные endpoint'ы;
 - summary из терминала;
 - JSON-файл из `results/`;
+- Markdown-отчет из `results/`;
+- ссылку на Grafana dashboard/time range;
+- CPU/RAM/network/container observations из Grafana;
 - краткие наблюдения по доступности сервиса.
 
 Blue team дальше сопоставляет результаты с метриками, логами и состоянием инфраструктуры.

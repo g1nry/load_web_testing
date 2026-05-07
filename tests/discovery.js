@@ -1,6 +1,7 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { defaultEndpoints, getTargetUrl, buildUrl } from '../config/endpoints.js';
+import { buildSummary } from '../config/report.js';
 import { discoveryThresholds } from '../config/thresholds.js';
 
 const targetUrl = getTargetUrl();
@@ -32,4 +33,8 @@ export default function () {
     console.log(`${endpoint} -> HTTP ${response.status}`);
     sleep(sleepSeconds);
   }
+}
+
+export function handleSummary(data) {
+  return buildSummary(data);
 }
