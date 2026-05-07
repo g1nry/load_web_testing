@@ -182,6 +182,191 @@ append_prometheus_metrics() {
   }
 }
 
+profile_endpoints_var() {
+  local profile="$1"
+
+  case "${profile}" in
+    throughput)
+      printf "THROUGHPUT_ENDPOINTS\n"
+      ;;
+    cpu)
+      printf "CPU_ENDPOINTS\n"
+      ;;
+    memory)
+      printf "MEMORY_ENDPOINTS\n"
+      ;;
+    network)
+      printf "NETWORK_ENDPOINTS\n"
+      ;;
+    capacity)
+      printf "CAPACITY_ENDPOINTS\n"
+      ;;
+    *)
+      printf "LOAD_ENDPOINTS\n"
+      ;;
+  esac
+}
+
+profile_endpoints() {
+  local profile="$1"
+  local var_name
+  local value
+
+  var_name="$(profile_endpoints_var "${profile}")"
+  value="${!var_name:-}"
+
+  if [ -z "${value}" ]; then
+    value="${LOAD_ENDPOINTS:-/}"
+  fi
+
+  printf "%s\n" "${value}"
+}
+
+is_control_endpoint() {
+  local endpoint="$1"
+  local clean_endpoint="${endpoint%%\?*}"
+
+  case "${clean_endpoint}" in
+    /ping|/healthz|/readyz|/version|/metrics)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+endpoint_audit_should_fail_on_status() {
+  local profile="$1"
+
+  case "${profile}" in
+    throughput|cpu|memory|network|capacity)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+audit_profile_endpoints() {
+  local profile="$1"
+  local target_url="${TARGET_URL:-}"
+  local raw_endpoints
+  local normalized_target
+  local endpoint
+  local clean_endpoint
+  local url
+  local tmp_file
+  local curl_output
+  local http_code
+  local size_download
+  local time_total
+  local bad_status_count=0
+  local control_count=0
+  local small_network_count=0
+  local endpoint_count=0
+  local min_network_bytes="${NETWORK_MIN_RESPONSE_BYTES:-10240}"
+  local curl_timeout
+
+  if [ -z "${target_url}" ]; then
+    return
+  fi
+
+  case "${profile}" in
+    throughput|cpu|memory|network|capacity)
+      ;;
+    *)
+      return
+      ;;
+  esac
+
+  raw_endpoints="$(profile_endpoints "${profile}")"
+  normalized_target="${target_url%/}"
+  curl_timeout="$(duration_to_seconds "${REQUEST_TIMEOUT:-10s}")"
+  if [ "${curl_timeout}" -le 0 ]; then
+    curl_timeout="10"
+  fi
+
+  printf "endpoint audit:\n"
+  printf "  %-22s %-6s %-10s %s\n" "endpoint" "status" "bytes" "time"
+
+  IFS=',' read -ra endpoints <<< "${raw_endpoints}"
+  for endpoint in "${endpoints[@]}"; do
+    endpoint="${endpoint// /}"
+    if [ -z "${endpoint}" ]; then
+      continue
+    fi
+
+    endpoint_count=$((endpoint_count + 1))
+    clean_endpoint="${endpoint%%\?*}"
+
+    if [[ "${endpoint}" == /* ]]; then
+      url="${normalized_target}${endpoint}"
+    else
+      url="${normalized_target}/${endpoint}"
+    fi
+
+    tmp_file="$(mktemp)"
+    set +e
+    curl_output="$(curl -sS -L -o "${tmp_file}" -w "%{http_code} %{size_download} %{time_total}" --max-time "${curl_timeout}" "${url}" 2>/dev/null)"
+    local curl_status=$?
+    set -e
+
+    if [ "${curl_status}" -ne 0 ] || [ -z "${curl_output}" ]; then
+      http_code="000"
+      size_download="0"
+      time_total="-"
+    else
+      read -r http_code size_download time_total <<< "${curl_output}"
+    fi
+
+    rm -f "${tmp_file}"
+
+    printf "  %-22s %-6s %-10s %s\n" "${endpoint}" "${http_code}" "${size_download}" "${time_total}s"
+
+    if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 400 ]; then
+      bad_status_count=$((bad_status_count + 1))
+    fi
+
+    if is_control_endpoint "${clean_endpoint}"; then
+      control_count=$((control_count + 1))
+    fi
+
+    if [ "${profile}" = "network" ] && [ "${size_download}" -lt "${min_network_bytes}" ]; then
+      small_network_count=$((small_network_count + 1))
+    fi
+  done
+
+  printf "\n"
+
+  if [ "${endpoint_count}" -eq 0 ]; then
+    printf "endpoint audit failed: no endpoints configured for %s.\n\n" "${profile}" >&2
+    return 1
+  fi
+
+  if endpoint_audit_should_fail_on_status "${profile}" && [ "${bad_status_count}" -gt 0 ]; then
+    printf "endpoint audit failed: %s endpoint(s) returned non-2xx/3xx status. Remove them from this pressure profile before running it.\n\n" "${bad_status_count}" >&2
+    return 1
+  fi
+
+  if [ "${profile}" = "cpu" ] && [ "${control_count}" -eq "${endpoint_count}" ]; then
+    printf "endpoint audit warning: CPU profile uses only light/control endpoints. It will mostly test routing and HTTP overhead, not service CPU saturation.\n\n" >&2
+  fi
+
+  if [ "${profile}" = "network" ]; then
+    if [ "${control_count}" -gt 0 ]; then
+      printf "endpoint audit failed: network profile includes control endpoints such as /metrics, /ping, /healthz, /readyz or /version. Use dedicated large-response endpoints instead.\n\n" >&2
+      return 1
+    fi
+
+    if [ "${small_network_count}" -gt 0 ]; then
+      printf "endpoint audit failed: %s network endpoint(s) returned less than NETWORK_MIN_RESPONSE_BYTES=%s bytes.\n\n" "${small_network_count}" "${min_network_bytes}" >&2
+      return 1
+    fi
+  fi
+}
+
 show_progress() {
   local pid="$1"
   local total_seconds="$2"
@@ -270,6 +455,7 @@ run_k6_profile() {
   export K6_SUMMARY_MARKDOWN="${report_file}"
 
   print_banner "${profile}" "${script}" "${result_file}" "${report_file}"
+  audit_profile_endpoints "${profile}"
 
   expected_duration="$(profile_duration_seconds "${profile}")"
 

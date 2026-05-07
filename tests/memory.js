@@ -40,7 +40,7 @@ export default function () {
 
   check(response, {
     'server responded': (res) => res.status > 0,
-    'status is not 5xx': (res) => res.status < 500,
+    'status is 2xx or 3xx': (res) => res.status >= 200 && res.status < 400,
     'response is large enough for memory pressure': () => bodyLength >= minResponseBytes,
   });
 

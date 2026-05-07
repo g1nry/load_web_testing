@@ -12,6 +12,7 @@
 - каждый запуск создает `.json`, `.md` и `.log`;
 - Prometheus можно подключить напрямую для автоматической вставки server-side метрик в Markdown-отчет;
 - heavy-профили не запускаются пакетно без `ALLOW_HIGH_IMPACT_TESTS=true`;
+- перед pressure-прогоном wrapper проверяет endpoint'ы через `curl`;
 - RAM/network профили требуют подходящих endpoint'ов от команды разработки.
 
 ## Scope
@@ -106,10 +107,10 @@ ALLOW_HIGH_IMPACT_TESTS=false
 `LOAD_ENDPOINTS` — fallback endpoint'ы для профилей, где не задан специальный список.
 
 ```bash
-LOAD_ENDPOINTS=/,/ping,/version
+LOAD_ENDPOINTS=/
 ```
 
-Перед pressure-тестами сначала запусти discovery и оставь только реально доступные пути.
+Перед pressure-тестами сначала запусти discovery и оставь только реально доступные пути с `2xx/3xx`. Endpoint'ы с `404`, `401`, `403` или редиректами в login лучше не добавлять в pressure-профили: k6 будет считать их failed requests.
 
 `ENABLE_CACHE_BUSTER=true` добавляет уникальный query parameter к запросам. Включай это только если нужно специально обходить cache: уникальные URL резко увеличивают cardinality метрик k6 и могут нагрузить runner.
 
@@ -158,11 +159,11 @@ GRAFANA_DASHBOARD_URL=http://81.26.176.68:3000/d/rYdddlPWk/node-exporter-full?or
 
 `throughput` — RPS-oriented профиль на `ramping-arrival-rate`. Нужен, чтобы понять, сколько запросов в секунду выдерживает сервис.
 
-`cpu` — CPU pressure через высокий RPS и опциональное отключение connection reuse. Лучше работает на endpoint'ах, которые реально заставляют backend выполнять работу.
+`cpu` — CPU pressure через высокий RPS и опциональное отключение connection reuse. Нужен endpoint, который реально заставляет backend выполнять работу. Healthcheck/status endpoint'ы обычно почти не грузят CPU.
 
 `memory` — memory/concurrency pressure. Требует endpoint'ов, которые создают заметную нагрузку на память: большие ответы, аллокации, кэш, тяжелые выборки, long-lived обработка. Если `MEMORY_ENDPOINTS` не задан или ответ слишком маленький, тест выведет предупреждение.
 
-`network` — bandwidth pressure. Требует endpoint'ов с большими ответами. Если `NETWORK_ENDPOINTS` не задан или ответ слишком маленький, тест выведет предупреждение.
+`network` — bandwidth pressure. Требует endpoint'ов с большими ответами. Не используй `/metrics`, `/ping`, `/healthz`, `/readyz`, `/version`: такие endpoint'ы могут грузить системный слой и сбор метрик, но не дают честный bandwidth-тест.
 
 `capacity` — controlled поиск failure threshold по RPS-ступеням. Задача: найти диапазон между последней стабильной нагрузкой и первой проблемной нагрузкой.
 
@@ -199,7 +200,7 @@ THROUGHPUT_MAX_VUS=500
 ### CPU
 
 ```bash
-CPU_ENDPOINTS=/
+CPU_ENDPOINTS=/cpu-heavy
 CPU_RATE_STEPS=25,50,100,200
 CPU_RAMP_DURATION=30s
 CPU_HOLD_DURATION=1m
@@ -208,6 +209,8 @@ CPU_PRE_ALLOCATED_VUS=100
 CPU_MAX_VUS=1000
 CPU_NO_CONNECTION_REUSE=false
 ```
+
+Если dedicated CPU endpoint еще не готов, можно временно поставить обычный рабочий endpoint, но результат нужно читать как HTTP/RPS pressure, а не как полноценный CPU pressure.
 
 `CPU_NO_CONNECTION_REUSE=true` делает тест гораздо жестче по TCP/NAT и может положить сеть runner'а раньше, чем будет найден CPU-предел сервиса. Включай это только отдельным согласованным прогоном.
 
@@ -299,10 +302,13 @@ Wrapper показывает:
 
 1. Проектный баннер.
 2. Метаданные запуска: profile, script, summary, report.
-3. Progressbar по расчетной длительности профиля.
-4. Итоговый k6 summary.
+3. Endpoint audit для pressure-профилей.
+4. Progressbar по расчетной длительности профиля.
+5. Итоговый k6 summary.
 
 k6 запускается в quiet-режиме. Raw stdout/stderr k6 сохраняется в `.log`, потом печатается после progressbar.
+
+Endpoint audit перед pressure-тестами печатает `status`, размер ответа и время ответа. Для `throughput`, `cpu`, `memory`, `network`, `capacity` запуск остановится, если endpoint возвращает не `2xx/3xx`. Для `network` запуск также остановится, если endpoint похож на control endpoint или возвращает меньше `NETWORK_MIN_RESPONSE_BYTES`.
 
 ## Результаты
 
@@ -383,6 +389,10 @@ for f in tests/*.js; do k6 inspect -e TARGET_URL=https://example.invalid "$f" >/
 `network` предупреждает про `NETWORK_ENDPOINTS` — профиль запущен без endpoint'а с большим ответом. Результат не стоит использовать как bandwidth pressure evidence.
 
 `http_req_failed` красный, но checks зеленые — часто в endpoint'ы попали 4xx ответы. Для pressure-профилей оставляй только endpoint'ы, которые дают 2xx/3xx.
+
+CPU почти не растет в Grafana — скорее всего профиль бьет по легким endpoint'ам (`/`, `/ping`, `/healthz`, `/version`). Для CPU pressure нужен отдельный endpoint с реальной вычислительной работой или тяжелый рабочий сценарий приложения.
+
+Network поднимает system load, но bandwidth маленький — проверь, что в `NETWORK_ENDPOINTS` нет `/metrics` и других служебных endpoint'ов. `/metrics` может грузить сбор метрик и kernel/system time, но это плохой источник сетевой нагрузки.
 
 High-cardinality warning от k6 — проверь, что `ENABLE_CACHE_BUSTER=false`. Уникальные query params создают слишком много time series.
 
