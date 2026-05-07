@@ -45,6 +45,10 @@ export function pickEndpoint(endpoints) {
 }
 
 export function appendCacheBuster(endpoint) {
+  if ((__ENV.ENABLE_CACHE_BUSTER || 'false') !== 'true') {
+    return endpoint;
+  }
+
   const separator = endpoint.includes('?') ? '&' : '?';
   return `${endpoint}${separator}k6_cb=${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }

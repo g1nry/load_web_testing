@@ -97,6 +97,7 @@ TARGET_URL=https://example.internal
 TARGET_URL=https://example.internal
 REQUEST_TIMEOUT=5s
 LOAD_ENDPOINTS=/
+ENABLE_CACHE_BUSTER=false
 
 TEST_PROFILES=smoke,discovery
 ALLOW_HIGH_IMPACT_TESTS=false
@@ -109,6 +110,8 @@ LOAD_ENDPOINTS=/,/ping,/version
 ```
 
 Перед pressure-тестами сначала запусти discovery и оставь только реально доступные пути.
+
+`ENABLE_CACHE_BUSTER=true` добавляет уникальный query parameter к запросам. Включай это только если нужно специально обходить cache: уникальные URL резко увеличивают cardinality метрик k6 и могут нагрузить runner.
 
 ## Prometheus / Grafana
 
@@ -378,6 +381,10 @@ for f in tests/*.js; do k6 inspect -e TARGET_URL=https://example.invalid "$f" >/
 `memory` предупреждает про `MEMORY_ENDPOINTS` — профиль запущен без endpoint'а, который реально грузит память. Результат не стоит использовать как RAM pressure evidence.
 
 `network` предупреждает про `NETWORK_ENDPOINTS` — профиль запущен без endpoint'а с большим ответом. Результат не стоит использовать как bandwidth pressure evidence.
+
+`http_req_failed` красный, но checks зеленые — часто в endpoint'ы попали 4xx ответы. Для pressure-профилей оставляй только endpoint'ы, которые дают 2xx/3xx.
+
+High-cardinality warning от k6 — проверь, что `ENABLE_CACHE_BUSTER=false`. Уникальные query params создают слишком много time series.
 
 Pressure-профиль пропущен в suite — включи `ALLOW_HIGH_IMPACT_TESTS=true`.
 
