@@ -40,6 +40,193 @@ EOF
   printf "%s\n\n" "                            "
 }
 
+duration_to_seconds() {
+  local duration="${1:-0s}"
+  local rest
+  local total=0
+
+  duration="${duration// /}"
+  duration="${duration,,}"
+  rest="${duration}"
+
+  if [[ "${rest}" =~ ^[0-9]+$ ]]; then
+    printf "%s\n" "${rest}"
+    return
+  fi
+
+  while [[ "${rest}" =~ ^([0-9]+)(ms|s|m|h)(.*)$ ]]; do
+    local value="${BASH_REMATCH[1]}"
+    local unit="${BASH_REMATCH[2]}"
+    rest="${BASH_REMATCH[3]}"
+
+    case "${unit}" in
+      ms)
+        if [ "${value}" -gt 0 ]; then
+          total=$((total + 1))
+        fi
+        ;;
+      s)
+        total=$((total + value))
+        ;;
+      m)
+        total=$((total + value * 60))
+        ;;
+      h)
+        total=$((total + value * 3600))
+        ;;
+    esac
+  done
+
+  printf "%s\n" "${total}"
+}
+
+format_seconds() {
+  local seconds="$1"
+  printf "%02d:%02d" "$((seconds / 60))" "$((seconds % 60))"
+}
+
+repeat_char() {
+  local char="$1"
+  local count="$2"
+  local output=""
+
+  while [ "${count}" -gt 0 ]; do
+    output="${output}${char}"
+    count=$((count - 1))
+  done
+
+  printf "%s" "${output}"
+}
+
+capacity_steps_count() {
+  local raw_steps="${CAPACITY_STEP_VUS:-5,10,20,40,60,80,100}"
+  local count=0
+  local step
+
+  IFS=',' read -ra steps <<< "${raw_steps}"
+
+  for step in "${steps[@]}"; do
+    step="${step// /}"
+    if [ -n "${step}" ]; then
+      count=$((count + 1))
+    fi
+  done
+
+  printf "%s\n" "${count}"
+}
+
+profile_duration_seconds() {
+  local profile="$1"
+
+  case "${profile}" in
+    smoke)
+      duration_to_seconds "${SMOKE_DURATION:-30s}"
+      ;;
+    discovery)
+      duration_to_seconds "${DISCOVERY_DURATION:-10s}"
+      ;;
+    baseline)
+      duration_to_seconds "${BASELINE_DURATION:-3m}"
+      ;;
+    load)
+      duration_to_seconds "${LOAD_DURATION:-5m}"
+      ;;
+    endurance)
+      duration_to_seconds "${ENDURANCE_DURATION:-30m}"
+      ;;
+    stress)
+      printf "%s\n" "$(
+        duration_to_seconds "${STRESS_STAGE_1_DURATION:-2m}" \
+          | {
+            read -r stage_1
+            stage_2="$(duration_to_seconds "${STRESS_STAGE_2_DURATION:-3m}")"
+            stage_3="$(duration_to_seconds "${STRESS_STAGE_3_DURATION:-3m}")"
+            ramp_down="$(duration_to_seconds "${STRESS_RAMP_DOWN_DURATION:-2m}")"
+            printf "%s\n" "$((stage_1 + stage_2 + stage_3 + ramp_down))"
+          }
+      )"
+      ;;
+    spike)
+      local low high recovery ramp_down
+      low="$(duration_to_seconds "${SPIKE_LOW_DURATION:-1m}")"
+      high="$(duration_to_seconds "${SPIKE_HIGH_DURATION:-1m}")"
+      recovery="$(duration_to_seconds "${SPIKE_RECOVERY_DURATION:-2m}")"
+      ramp_down="$(duration_to_seconds "30s")"
+      printf "%s\n" "$((low + high + recovery + ramp_down))"
+      ;;
+    capacity)
+      local steps ramp hold ramp_down
+      steps="$(capacity_steps_count)"
+      ramp="$(duration_to_seconds "${CAPACITY_RAMP_DURATION:-30s}")"
+      hold="$(duration_to_seconds "${CAPACITY_HOLD_DURATION:-1m}")"
+      ramp_down="$(duration_to_seconds "${CAPACITY_RAMP_DOWN_DURATION:-1m}")"
+      printf "%s\n" "$((steps * (ramp + hold) + ramp_down))"
+      ;;
+    *)
+      printf "0\n"
+      ;;
+  esac
+}
+
+show_progress() {
+  local pid="$1"
+  local total_seconds="$2"
+  local width=28
+  local elapsed=0
+  local percent=0
+  local filled=0
+  local empty=0
+  local bar=""
+  local final_elapsed=0
+
+  if [ "${total_seconds}" -le 0 ]; then
+    printf "progress: running...\n"
+    while kill -0 "${pid}" 2>/dev/null; do
+      sleep 1
+    done
+    return
+  fi
+
+  while kill -0 "${pid}" 2>/dev/null; do
+    if [ "${elapsed}" -gt "${total_seconds}" ]; then
+      percent=99
+    else
+      percent=$((elapsed * 100 / total_seconds))
+    fi
+
+    filled=$((percent * width / 100))
+    empty=$((width - filled))
+    bar="$(repeat_char "#" "${filled}")"
+    bar="${bar}$(repeat_char "-" "${empty}")"
+
+    printf "\rprogress: [%s] %3d%% %s/%s" \
+      "${bar}" \
+      "${percent}" \
+      "$(format_seconds "${elapsed}")" \
+      "$(format_seconds "${total_seconds}")"
+
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  final_elapsed="${elapsed}"
+  if [ "${final_elapsed}" -gt "${total_seconds}" ]; then
+    final_elapsed="${total_seconds}"
+  fi
+
+  percent=$((final_elapsed * 100 / total_seconds))
+  filled=$((percent * width / 100))
+  empty=$((width - filled))
+  bar="$(repeat_char "#" "${filled}")"
+  bar="${bar}$(repeat_char "-" "${empty}")"
+
+  printf "\rprogress: [%s] %3d%% %s/%s finished\n\n" \
+    "${bar}" \
+    "${percent}" \
+    "$(format_seconds "${final_elapsed}")" \
+    "$(format_seconds "${total_seconds}")"
+}
+
 run_k6_profile() {
   local profile="$1"
   local script="$2"
@@ -47,6 +234,10 @@ run_k6_profile() {
   local started_at
   local result_file
   local report_file
+  local log_file
+  local expected_duration
+  local k6_pid
+  local k6_status
 
   mkdir -p results
   load_env
@@ -55,6 +246,7 @@ run_k6_profile() {
   started_at="$(date +%Y-%m-%dT%H:%M:%S%z)"
   result_file="results/${profile}-${timestamp}.json"
   report_file="results/${profile}-${timestamp}.md"
+  log_file="results/${profile}-${timestamp}.log"
 
   export K6_PROFILE="${profile}"
   export K6_SCRIPT="${script}"
@@ -64,8 +256,22 @@ run_k6_profile() {
 
   print_banner "${profile}" "${script}" "${result_file}" "${report_file}"
 
+  expected_duration="$(profile_duration_seconds "${profile}")"
+
   k6 run \
     --quiet \
     --summary-export "${result_file}" \
-    "${script}"
+    "${script}" > "${log_file}" 2>&1 &
+
+  k6_pid=$!
+  show_progress "${k6_pid}" "${expected_duration}"
+
+  set +e
+  wait "${k6_pid}"
+  k6_status=$?
+  set -e
+
+  cat "${log_file}"
+
+  return "${k6_status}"
 }
