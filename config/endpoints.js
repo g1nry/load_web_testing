@@ -31,6 +31,20 @@ export function getLoadEndpoints() {
     .filter(Boolean);
 }
 
+export function getEnvEndpoints(name, fallback = '/') {
+  const rawEndpoints = __ENV[name] || fallback;
+
+  return rawEndpoints
+    .split(',')
+    .map((endpoint) => endpoint.trim())
+    .filter(Boolean);
+}
+
 export function pickEndpoint(endpoints) {
   return endpoints[Math.floor(Math.random() * endpoints.length)];
+}
+
+export function appendCacheBuster(endpoint) {
+  const separator = endpoint.includes('?') ? '&' : '?';
+  return `${endpoint}${separator}k6_cb=${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }

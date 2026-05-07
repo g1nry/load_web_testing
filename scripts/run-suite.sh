@@ -7,7 +7,7 @@ if [ -f .env ]; then
   set +a
 fi
 
-profiles="${TEST_PROFILES:-smoke,discovery,baseline}"
+profiles="${TEST_PROFILES:-smoke,discovery}"
 allow_high_impact="${ALLOW_HIGH_IMPACT_TESTS:-false}"
 
 normalized_profiles="${profiles//,/ }"
@@ -15,7 +15,7 @@ failed_profiles=()
 
 for profile in ${normalized_profiles}; do
   case "${profile}" in
-    stress|spike|endurance|capacity)
+    throughput|cpu|memory|network|capacity)
       if [ "${allow_high_impact}" != "true" ]; then
         echo "Skipping ${profile}: set ALLOW_HIGH_IMPACT_TESTS=true in .env to allow high-impact profiles."
         continue

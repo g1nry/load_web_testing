@@ -1,19 +1,18 @@
-# Web Load Tests
+# Web Pressure Tests
 
-`k6`-репозиторий для авторизованных black-box HTTP load tests веб-сервера команды.
+`k6`-репозиторий для авторизованного black-box HTTP pressure testing веб-сервера команды.
 
-Проект не требует знания backend/framework, не лезет в контейнеры и не зависит от Ansible. Все тесты работают только через внешний HTTP target, который задается локально перед запуском.
+Проект не требует доступа к backend-коду, контейнерам или Ansible. Нагрузка идет только на согласованный внешний HTTP target из локального `.env`.
 
 ## Главное
 
-- реальный `TARGET_URL` не хранится в репозитории;
-- основной способ настройки wrapper-скриптов — локальный `.env`;
-- сами `k6`-сценарии читают параметры из переменных окружения;
-- публичный пример настроек лежит в `.env.example`;
+- `TARGET_URL` не хранится в git;
+- основной конфиг запуска лежит в локальном `.env`;
 - результаты сохраняются в `results/`;
-- каждый запуск сохраняет JSON summary, Markdown-отчет и raw log;
-- `.env` и `results/` не коммитятся;
-- тяжелые профили не запускаются пакетно без явного флага.
+- каждый запуск создает `.json`, `.md` и `.log`;
+- Prometheus можно подключить напрямую для автоматической вставки server-side метрик в Markdown-отчет;
+- heavy-профили не запускаются пакетно без `ALLOW_HIGH_IMPACT_TESTS=true`;
+- RAM/network профили требуют подходящих endpoint'ов от команды разработки.
 
 ## Scope
 
@@ -21,40 +20,41 @@
 
 - smoke testing;
 - endpoint discovery;
-- baseline load testing;
-- load testing;
-- controlled stress testing;
-- controlled spike testing;
-- endurance testing;
+- throughput / RPS pressure;
+- CPU pressure;
+- memory/concurrency pressure через подготовленные endpoint'ы;
+- network bandwidth pressure через large-response endpoint'ы;
 - controlled capacity / failure-threshold search;
-- сохранение локальных `k6` summary.
+- сбор k6-отчетов и Prometheus-метрик.
 
-Запрещено использовать этот проект для неавторизованных атак, обхода rate limit, сокрытия источника трафика, эксплуатации уязвимостей или тестирования сторонних систем.
+Запрещено использовать проект для неавторизованных атак, обхода rate limit, сокрытия источника трафика, эксплуатации уязвимостей или тестирования сторонних систем.
 
 ## Требования
 
-На Linux runner должны быть установлены:
+На runner должны быть установлены:
 
 - `git`;
 - `bash`;
+- `curl`;
+- `jq`;
 - `k6`.
 
 Проверка:
 
 ```bash
 k6 version
+curl --version
+jq --version
 ```
 
 ### Установка k6 на Debian/Ubuntu
-
-`k6` обычно не ставится из стандартных `apt`-репозиториев. Нужно подключить репозиторий `dl.k6.io`.
 
 ```bash
 sudo rm -f /usr/share/keyrings/k6-archive-keyring.gpg
 sudo rm -f /etc/apt/sources.list.d/k6.list
 
 sudo apt-get update
-sudo apt-get install -y ca-certificates gnupg2 curl
+sudo apt-get install -y ca-certificates gnupg2 curl jq
 
 sudo install -d -m 0755 /etc/apt/keyrings
 
@@ -69,8 +69,6 @@ echo "deb [signed-by=/etc/apt/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/
 
 sudo apt-get update
 sudo apt-get install -y k6
-
-k6 version
 ```
 
 ## Быстрый старт
@@ -83,19 +81,13 @@ cp .env.example .env
 chmod +x scripts/*.sh
 ```
 
-Открой `.env` и замени плейсхолдер на согласованный target:
+В `.env` укажи согласованный target:
 
 ```bash
 TARGET_URL=https://example.internal
 ```
 
-Реальный адрес стенда не нужно добавлять в git.
-
-Перед первым запуском убедись, что `TARGET_URL` задан:
-
-```bash
-grep '^TARGET_URL=' .env
-```
+`TARGET_URL` лучше указывать без завершающего `/`.
 
 ## Основная конфигурация
 
@@ -104,131 +96,51 @@ grep '^TARGET_URL=' .env
 ```bash
 TARGET_URL=https://example.internal
 REQUEST_TIMEOUT=5s
-SLEEP_SECONDS=1
 LOAD_ENDPOINTS=/
 
-TEST_PROFILES=smoke,discovery,baseline
+TEST_PROFILES=smoke,discovery
 ALLOW_HIGH_IMPACT_TESTS=false
 ```
 
-`TARGET_URL` лучше указывать без завершающего `/`.
-
-Wrapper-скрипты из `scripts/` перед запуском читают `.env`. Для разовых override'ов проще временно изменить `.env` или запускать `k6 run tests/<profile>.js` напрямую с нужными переменными окружения.
-
-`LOAD_ENDPOINTS` поддерживает несколько путей через запятую:
+`LOAD_ENDPOINTS` — fallback endpoint'ы для профилей, где не задан специальный список.
 
 ```bash
 LOAD_ENDPOINTS=/,/ping,/version
 ```
 
-Перед добавлением endpoint'ов в нагрузочные профили сначала запусти discovery и оставь только реально доступные пути.
+Перед pressure-тестами сначала запусти discovery и оставь только реально доступные пути.
 
-Если Grafana уже настроена, можно добавить ссылку на dashboard или нужный time range:
+## Prometheus / Grafana
 
-```bash
-GRAFANA_DASHBOARD_URL=https://grafana.example/d/...
-```
-
-Эта ссылка попадет в Markdown-отчет запуска.
-
-## Переменные профилей
-
-Общие переменные:
-
-| Переменная | Назначение |
-| --- | --- |
-| `TARGET_URL` | Согласованный HTTP target без завершающего `/` |
-| `REQUEST_TIMEOUT` | Таймаут одного HTTP-запроса |
-| `SLEEP_SECONDS` | Пауза между итерациями виртуального пользователя |
-| `LOAD_ENDPOINTS` | Список endpoint'ов для нагрузочных профилей через запятую |
-| `GRAFANA_DASHBOARD_URL` | Ссылка на dashboard/time range для ручной вставки в Markdown-отчет |
-| `TEST_PROFILES` | Список профилей для `run-suite.sh` через запятую |
-| `ALLOW_HIGH_IMPACT_TESTS` | Разрешает пакетный запуск `stress`, `spike`, `endurance`, `capacity` |
-
-Профильные переменные:
-
-| Профиль | Переменные |
-| --- | --- |
-| `smoke` | `SMOKE_VUS`, `SMOKE_DURATION` |
-| `discovery` | `DISCOVERY_VUS`, `DISCOVERY_DURATION` |
-| `baseline` | `BASELINE_VUS`, `BASELINE_DURATION` |
-| `load` | `LOAD_VUS`, `LOAD_DURATION` |
-| `stress` | `STRESS_STAGE_1_VUS`, `STRESS_STAGE_1_DURATION`, `STRESS_STAGE_2_VUS`, `STRESS_STAGE_2_DURATION`, `STRESS_STAGE_3_VUS`, `STRESS_STAGE_3_DURATION`, `STRESS_RAMP_DOWN_DURATION` |
-| `spike` | `SPIKE_LOW_VUS`, `SPIKE_HIGH_VUS`, `SPIKE_LOW_DURATION`, `SPIKE_HIGH_DURATION`, `SPIKE_RECOVERY_DURATION` |
-| `endurance` | `ENDURANCE_VUS`, `ENDURANCE_DURATION` |
-| `capacity` | `CAPACITY_STEP_VUS`, `CAPACITY_RAMP_DURATION`, `CAPACITY_HOLD_DURATION`, `CAPACITY_RAMP_DOWN_DURATION` |
-
-## Пакетный запуск
-
-Для обычного запуска используй suite-runner:
+Если Prometheus доступен напрямую, добавь в `.env`:
 
 ```bash
-./scripts/run-suite.sh
+PROMETHEUS_URL=http://81.26.176.68:9090
+PROMETHEUS_INSTANCE=
+PROMETHEUS_NET_DEVICE=
+PROMETHEUS_QUERY_STEP=30s
 ```
 
-Он читает список профилей из `.env`:
+Если `PROMETHEUS_URL` задан, wrapper после k6-прогона запросит Prometheus за time range теста и допишет в Markdown-отчет:
+
+- CPU usage avg/max;
+- Memory usage avg/max;
+- Network RX avg/max;
+- Network TX avg/max.
+
+`PROMETHEUS_INSTANCE` можно оставить пустым, если нужно брать все instance. `PROMETHEUS_NET_DEVICE` можно оставить пустым, тогда будут использованы non-loopback network devices.
+
+Ссылку на Grafana dashboard можно добавить отдельно:
 
 ```bash
-TEST_PROFILES=smoke,discovery,baseline
+GRAFANA_DASHBOARD_URL=http://81.26.176.68:3000/d/rYdddlPWk/node-exporter-full?orgId=1
 ```
 
-Профили `stress`, `spike`, `endurance` и `capacity` считаются high-impact. При пакетном запуске они будут пропущены, пока явно не включен флаг:
-
-```bash
-ALLOW_HIGH_IMPACT_TESTS=true
-```
-
-Пример для согласованного окна расширенного тестирования:
-
-```bash
-TEST_PROFILES=smoke,baseline,load,stress,spike,endurance,capacity
-ALLOW_HIGH_IMPACT_TESTS=true
-```
-
-Suite запускает профили по порядку. Если один профиль завершился ошибкой, следующие профили все равно будут запущены, а в конце suite вернет non-zero exit code и выведет список упавших профилей.
-
-## Запуск одного профиля
-
-Через общий wrapper:
-
-```bash
-./scripts/run-profile.sh smoke
-./scripts/run-profile.sh discovery
-./scripts/run-profile.sh baseline
-./scripts/run-profile.sh load
-./scripts/run-profile.sh stress
-./scripts/run-profile.sh spike
-./scripts/run-profile.sh endurance
-./scripts/run-profile.sh capacity
-```
-
-Или напрямую:
-
-```bash
-./scripts/run-smoke.sh
-./scripts/run-discovery.sh
-./scripts/run-baseline.sh
-./scripts/run-load.sh
-./scripts/run-stress.sh
-./scripts/run-spike.sh
-./scripts/run-endurance.sh
-./scripts/run-capacity.sh
-```
-
-Wrapper-скрипты печатают проектный баннер, показывают progressbar и запускают `k6` в quiet-режиме, чтобы стандартный баннер Grafana k6 не перебивал вывод.
-
-Порядок вывода при запуске:
-
-1. Проектный баннер.
-2. Метаданные запуска: `execution`, `script`, `output`, `scenarios`, `profile`, `summary`, `report`.
-3. Progressbar по ожидаемой длительности профиля.
-4. Итоговый `k6` summary.
-
-Progressbar рассчитывается по длительности профиля из `.env`. Для staged-профилей суммируются длительности стадий.
+Она попадет в Markdown-отчет как быстрый переход к визуализации.
 
 ## Профили
 
-`smoke` — минимальная проверка доступности `/`.
+`smoke` — минимальная проверка `/`.
 
 `discovery` — аккуратная проверка типовых endpoint'ов:
 
@@ -241,171 +153,231 @@ Progressbar рассчитывается по длительности проф�
 /metrics
 ```
 
-`baseline` — умеренная обычная нагрузка.
+`throughput` — RPS-oriented профиль на `ramping-arrival-rate`. Нужен, чтобы понять, сколько запросов в секунду выдерживает сервис.
 
-`load` — повышенная нагрузка.
+`cpu` — CPU pressure через высокий RPS и опциональное отключение connection reuse. Лучше работает на endpoint'ах, которые реально заставляют backend выполнять работу.
 
-`stress` — постепенное увеличение нагрузки для поиска предела устойчивости.
+`memory` — memory/concurrency pressure. Требует endpoint'ов, которые создают заметную нагрузку на память: большие ответы, аллокации, кэш, тяжелые выборки, long-lived обработка. Если `MEMORY_ENDPOINTS` не задан или ответ слишком маленький, тест выведет предупреждение.
 
-`spike` — резкий всплеск нагрузки.
+`network` — bandwidth pressure. Требует endpoint'ов с большими ответами. Если `NETWORK_ENDPOINTS` не задан или ответ слишком маленький, тест выведет предупреждение.
 
-`endurance` — длительная умеренная нагрузка.
+`capacity` — controlled поиск failure threshold по RPS-ступеням. Задача: найти диапазон между последней стабильной нагрузкой и первой проблемной нагрузкой.
 
-`capacity` — контролируемый ступенчатый поиск первой нагрузки, на которой нарушаются критерии устойчивости. Используй для оценки диапазона “последняя стабильная нагрузка / первая проблемная нагрузка”, а не для неограниченного краша сервиса.
+Все pressure-профили считаются high-impact:
 
-`stress`, `spike`, `endurance` и `capacity` запускаются только после согласования окна тестирования с командой.
+```text
+throughput
+cpu
+memory
+network
+capacity
+```
 
-Пример настройки `capacity`:
+Пакетно они запускаются только при:
 
 ```bash
-CAPACITY_STEP_VUS=5,10,20,40,60,80,100
+ALLOW_HIGH_IMPACT_TESTS=true
+```
+
+## Переменные профилей
+
+### Throughput
+
+```bash
+THROUGHPUT_ENDPOINTS=/
+THROUGHPUT_RATE_STEPS=50,100,200,400
+THROUGHPUT_RAMP_DURATION=30s
+THROUGHPUT_HOLD_DURATION=1m
+THROUGHPUT_RAMP_DOWN_DURATION=30s
+THROUGHPUT_PRE_ALLOCATED_VUS=50
+THROUGHPUT_MAX_VUS=500
+```
+
+### CPU
+
+```bash
+CPU_ENDPOINTS=/
+CPU_RATE=500
+CPU_DURATION=5m
+CPU_PRE_ALLOCATED_VUS=100
+CPU_MAX_VUS=1000
+CPU_NO_CONNECTION_REUSE=true
+```
+
+### Memory
+
+```bash
+MEMORY_ENDPOINTS=/memory-heavy
+MEMORY_VUS=300
+MEMORY_DURATION=10m
+MEMORY_REQUEST_TIMEOUT=15s
+MEMORY_SLEEP_SECONDS=0
+MEMORY_MIN_RESPONSE_BYTES=1024
+```
+
+Если команда разработки еще не добавила memory-heavy endpoint, профиль можно запустить, но результат нужно считать слабым/непоказательным.
+
+### Network
+
+```bash
+NETWORK_ENDPOINTS=/large-response
+NETWORK_RATE=200
+NETWORK_DURATION=5m
+NETWORK_PRE_ALLOCATED_VUS=100
+NETWORK_MAX_VUS=1000
+NETWORK_REQUEST_TIMEOUT=15s
+NETWORK_MIN_RESPONSE_BYTES=10240
+```
+
+Для network pressure нужен endpoint, который отдает достаточно большой payload.
+
+### Capacity
+
+```bash
+CAPACITY_ENDPOINTS=/
+CAPACITY_RATE_STEPS=50,100,200,400,800
 CAPACITY_RAMP_DURATION=30s
 CAPACITY_HOLD_DURATION=1m
 CAPACITY_RAMP_DOWN_DURATION=1m
+CAPACITY_PRE_ALLOCATED_VUS=100
+CAPACITY_MAX_VUS=2000
 ```
 
-Это означает: для каждого значения VUs будет ramp-up и hold, затем общий ramp-down. После запуска нужно сопоставить Markdown-отчет k6 с Grafana/Prometheus за тот же time range.
+## Запуск
 
-## Рекомендуемый порядок
-
-1. Скопировать `.env.example` в `.env`.
-2. Указать согласованный `TARGET_URL`.
-3. Запустить `smoke`.
-4. Запустить `discovery`.
-5. Обновить `LOAD_ENDPOINTS` в `.env`.
-6. Запустить `baseline`.
-7. Запустить `load`.
-8. По согласованию запустить `stress`, `spike`, `endurance`, `capacity`.
-
-Команды:
+Один профиль:
 
 ```bash
 ./scripts/run-profile.sh smoke
 ./scripts/run-profile.sh discovery
-
-# после discovery обновить LOAD_ENDPOINTS
-./scripts/run-profile.sh baseline
-./scripts/run-profile.sh load
-```
-
-High-impact профили:
-
-```bash
-./scripts/run-profile.sh stress
-./scripts/run-profile.sh spike
-./scripts/run-profile.sh endurance
+./scripts/run-profile.sh throughput
+./scripts/run-profile.sh cpu
+./scripts/run-profile.sh memory
+./scripts/run-profile.sh network
 ./scripts/run-profile.sh capacity
 ```
 
-`ALLOW_HIGH_IMPACT_TESTS` проверяется только в `run-suite.sh`. При прямом запуске через `run-profile.sh` ответственность за согласованное окно тестирования остается на операторе.
-
-Для пакетного high-impact запуска укажи в `.env`:
+Или напрямую:
 
 ```bash
-TEST_PROFILES=smoke,baseline,load,stress,spike,endurance,capacity
-ALLOW_HIGH_IMPACT_TESTS=true
+./scripts/run-smoke.sh
+./scripts/run-discovery.sh
+./scripts/run-throughput.sh
+./scripts/run-cpu.sh
+./scripts/run-memory.sh
+./scripts/run-network.sh
+./scripts/run-capacity.sh
 ```
 
-Затем запусти:
+Пакетный запуск читает `TEST_PROFILES`:
 
 ```bash
+TEST_PROFILES=smoke,discovery
 ./scripts/run-suite.sh
 ```
 
+Pressure suite:
+
+```bash
+TEST_PROFILES=smoke,discovery,throughput,cpu,memory,network,capacity
+ALLOW_HIGH_IMPACT_TESTS=true
+./scripts/run-suite.sh
+```
+
+`run-suite.sh` не останавливается на первом failed profile. Он проходит все разрешенные профили, а в конце выводит список упавших.
+
+## Вывод во время запуска
+
+Wrapper показывает:
+
+1. Проектный баннер.
+2. Метаданные запуска: profile, script, summary, report.
+3. Progressbar по расчетной длительности профиля.
+4. Итоговый k6 summary.
+
+k6 запускается в quiet-режиме. Raw stdout/stderr k6 сохраняется в `.log`, потом печатается после progressbar.
+
 ## Результаты
 
-Скрипты сохраняют три файла на запуск:
-
-- `.json` — machine-readable `k6` summary;
-- `.md` — человекочитаемый отчет;
-- `.log` — raw stdout/stderr k6, который wrapper печатает после progressbar.
-
-Примеры:
+На каждый запуск создаются:
 
 ```text
-results/smoke-20260503-153000.json
-results/smoke-20260503-153000.md
-results/smoke-20260503-153000.log
-results/baseline-20260503-154500.json
-results/baseline-20260503-154500.md
-results/baseline-20260503-154500.log
-results/stress-20260503-160000.json
-results/stress-20260503-160000.md
-results/stress-20260503-160000.log
+results/<profile>-<timestamp>.json
+results/<profile>-<timestamp>.md
+results/<profile>-<timestamp>.log
 ```
 
 Markdown-отчет содержит:
 
 - параметры запуска;
-- RPS, latency, checks, failure rate;
-- объем отправленных/полученных данных;
-- среднюю сетевую нагрузку runner'а в Mbps;
-- статус thresholds;
-- секцию для ручного заполнения server-side метрик из Grafana.
-
-Server-side ресурсы сервиса нужно брать из Grafana/Prometheus за тот же time range: CPU, RAM, network receive/transmit, рестарты контейнера, OOM, 5xx/timeouts.
+- RPS;
+- latency;
+- checks;
+- failure rate;
+- data sent / received;
+- среднюю сетевую нагрузку runner'а;
+- thresholds;
+- Prometheus server-side метрики, если `PROMETHEUS_URL` задан;
+- поля для выводов по capacity/failure threshold.
 
 ## Как читать отчет
 
-Markdown-отчет из `results/` отвечает за сторону k6 runner'а:
+k6 показывает client-side сторону:
 
-- сколько запросов отправлено;
-- какой был средний RPS;
-- какой процент ошибок;
+- сколько запросов отправили;
+- какой RPS был достигнут;
+- сколько было ошибок;
 - какая latency;
-- сколько данных отправлено и получено;
-- какая примерная средняя сетевая нагрузка была со стороны runner'а.
+- сколько данных ушло и пришло со стороны runner'а.
 
-Grafana/Prometheus отвечает за сторону сервера:
+Prometheus/Grafana показывают server-side сторону:
 
 - CPU;
 - RAM;
 - Network RX/TX;
-- рестарты контейнера;
+- рестарты;
 - OOM;
-- 5xx/timeouts и их корреляция с нагрузкой.
+- 5xx/timeouts в инфраструктурных метриках.
 
-Для итогового вывода по устойчивости нужно сопоставить оба слоя за один и тот же time range.
+Итог по устойчивости делается только при сопоставлении обоих слоев за один time range.
+
+## Рекомендуемый порядок
+
+1. Настроить `.env`.
+2. Запустить `smoke`.
+3. Запустить `discovery`.
+4. Настроить endpoint'ы для pressure-профилей.
+5. Запустить `throughput`.
+6. Запустить `cpu`.
+7. Если есть подходящие endpoint'ы, запустить `memory` и `network`.
+8. Запустить `capacity` в согласованное окно.
+9. Сопоставить Markdown-отчеты с Grafana/Prometheus.
 
 ## Проверка репозитория
 
-Локально можно проверить shell-скрипты без запуска нагрузки:
+Проверить shell:
 
 ```bash
 find scripts -type f -exec bash -n {} \;
 ```
 
-Проверить, что все k6-сценарии собираются:
+Проверить k6-сценарии без нагрузки:
 
 ```bash
 for f in tests/*.js; do k6 inspect -e TARGET_URL=https://example.invalid "$f" >/dev/null || exit 1; done
 ```
 
-На машине с установленным `k6` можно проверить, что сценарий собирается и стартует, коротким smoke-запуском:
-
-```bash
-# в .env временно поставь SMOKE_DURATION=5s
-./scripts/run-profile.sh smoke
-```
-
-Значения для wrapper-скриптов берутся из `.env`. Если `.env` уже содержит `SMOKE_DURATION`, измени его там перед короткой проверкой.
-
 ## Частые проблемы
 
-`k6: command not found` — `k6` не установлен или не попал в `PATH`. Проверь:
+`TARGET_URL is required` — в `.env` нет `TARGET_URL` или запуск идет не из корня репозитория.
 
-```bash
-k6 version
-which k6
-```
+`memory` предупреждает про `MEMORY_ENDPOINTS` — профиль запущен без endpoint'а, который реально грузит память. Результат не стоит использовать как RAM pressure evidence.
 
-`TARGET_URL is required` — в `.env` нет `TARGET_URL` или скрипт запущен не из корня репозитория.
+`network` предупреждает про `NETWORK_ENDPOINTS` — профиль запущен без endpoint'а с большим ответом. Результат не стоит использовать как bandwidth pressure evidence.
 
-`HTTP 404` в discovery не всегда ошибка. Discovery специально проверяет типовые endpoint'ы и нужен для выбора рабочих путей в `LOAD_ENDPOINTS`.
+Pressure-профиль пропущен в suite — включи `ALLOW_HIGH_IMPACT_TESTS=true`.
 
-Пакетный запуск пропускает `stress`, `spike`, `endurance`, `capacity` — это ожидаемо, если `ALLOW_HIGH_IMPACT_TESTS` не равен `true`.
-
-Progressbar дошел не до 100%, но тест завершился — это возможно, если k6 завершился раньше расчетной длительности профиля, например из-за ошибки конфигурации, failed init или ручной остановки. Смотри `.log`, `.json` и `.md` в `results/`.
+Prometheus-метрики не попали в отчет — проверь `PROMETHEUS_URL`, `PROMETHEUS_INSTANCE`, `PROMETHEUS_NET_DEVICE`, доступность `/api/v1/query`, `curl` и `jq`.
 
 ## Структура
 
@@ -413,11 +385,10 @@ Progressbar дошел не до 100%, но тест завершился — э
 tests/
   smoke.js
   discovery.js
-  baseline.js
-  load.js
-  stress.js
-  spike.js
-  endurance.js
+  throughput.js
+  cpu.js
+  memory.js
+  network.js
   capacity.js
 
 config/
@@ -428,15 +399,15 @@ config/
 scripts/
   run-smoke.sh
   run-discovery.sh
-  run-baseline.sh
-  run-load.sh
-  run-stress.sh
-  run-spike.sh
-  run-endurance.sh
+  run-throughput.sh
+  run-cpu.sh
+  run-memory.sh
+  run-network.sh
   run-capacity.sh
   run-profile.sh
   run-suite.sh
   lib.sh
+  fetch-prometheus-metrics.sh
 
 results/
 .env.example
@@ -444,4 +415,4 @@ results/
 README.md
 ```
 
-`docs/` может существовать локально как внутренняя документация проекта, но для запуска тестов он не требуется.
+`docs/` может существовать локально как рабочая зона для заметок и передачи teammate'у, но для запуска тестов он не требуется.

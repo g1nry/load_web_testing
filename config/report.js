@@ -79,7 +79,18 @@ function thresholdsStatus(data) {
 }
 
 function endpointList() {
-  return (__ENV.LOAD_ENDPOINTS || '/')
+  const profile = __ENV.K6_PROFILE || '';
+  const endpointEnvByProfile = {
+    throughput: 'THROUGHPUT_ENDPOINTS',
+    cpu: 'CPU_ENDPOINTS',
+    memory: 'MEMORY_ENDPOINTS',
+    network: 'NETWORK_ENDPOINTS',
+    capacity: 'CAPACITY_ENDPOINTS',
+  };
+  const endpointEnv = endpointEnvByProfile[profile] || 'LOAD_ENDPOINTS';
+  const rawEndpoints = __ENV[endpointEnv] || __ENV.LOAD_ENDPOINTS || '/';
+
+  return rawEndpoints
     .split(',')
     .map((endpoint) => endpoint.trim())
     .filter(Boolean)

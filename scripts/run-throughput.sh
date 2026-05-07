@@ -4,4 +4,4 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${script_dir}/lib.sh"
 
-run_k6_profile "stress" "tests/stress.js"
+run_k6_profile "throughput" "tests/throughput.js"

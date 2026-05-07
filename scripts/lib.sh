@@ -99,7 +99,7 @@ repeat_char() {
 }
 
 capacity_steps_count() {
-  local raw_steps="${CAPACITY_STEP_VUS:-5,10,20,40,60,80,100}"
+  local raw_steps="${1:-}"
   local count=0
   local step
 
@@ -125,38 +125,26 @@ profile_duration_seconds() {
     discovery)
       duration_to_seconds "${DISCOVERY_DURATION:-10s}"
       ;;
-    baseline)
-      duration_to_seconds "${BASELINE_DURATION:-3m}"
+    throughput)
+      local steps ramp hold ramp_down
+      steps="$(capacity_steps_count "${THROUGHPUT_RATE_STEPS:-50,100,200,400}")"
+      ramp="$(duration_to_seconds "${THROUGHPUT_RAMP_DURATION:-30s}")"
+      hold="$(duration_to_seconds "${THROUGHPUT_HOLD_DURATION:-1m}")"
+      ramp_down="$(duration_to_seconds "${THROUGHPUT_RAMP_DOWN_DURATION:-30s}")"
+      printf "%s\n" "$((steps * (ramp + hold) + ramp_down))"
       ;;
-    load)
-      duration_to_seconds "${LOAD_DURATION:-5m}"
+    cpu)
+      duration_to_seconds "${CPU_DURATION:-5m}"
       ;;
-    endurance)
-      duration_to_seconds "${ENDURANCE_DURATION:-30m}"
+    memory)
+      duration_to_seconds "${MEMORY_DURATION:-10m}"
       ;;
-    stress)
-      printf "%s\n" "$(
-        duration_to_seconds "${STRESS_STAGE_1_DURATION:-2m}" \
-          | {
-            read -r stage_1
-            stage_2="$(duration_to_seconds "${STRESS_STAGE_2_DURATION:-3m}")"
-            stage_3="$(duration_to_seconds "${STRESS_STAGE_3_DURATION:-3m}")"
-            ramp_down="$(duration_to_seconds "${STRESS_RAMP_DOWN_DURATION:-2m}")"
-            printf "%s\n" "$((stage_1 + stage_2 + stage_3 + ramp_down))"
-          }
-      )"
-      ;;
-    spike)
-      local low high recovery ramp_down
-      low="$(duration_to_seconds "${SPIKE_LOW_DURATION:-1m}")"
-      high="$(duration_to_seconds "${SPIKE_HIGH_DURATION:-1m}")"
-      recovery="$(duration_to_seconds "${SPIKE_RECOVERY_DURATION:-2m}")"
-      ramp_down="$(duration_to_seconds "30s")"
-      printf "%s\n" "$((low + high + recovery + ramp_down))"
+    network)
+      duration_to_seconds "${NETWORK_DURATION:-5m}"
       ;;
     capacity)
       local steps ramp hold ramp_down
-      steps="$(capacity_steps_count)"
+      steps="$(capacity_steps_count "${CAPACITY_RATE_STEPS:-50,100,200,400,800}")"
       ramp="$(duration_to_seconds "${CAPACITY_RAMP_DURATION:-30s}")"
       hold="$(duration_to_seconds "${CAPACITY_HOLD_DURATION:-1m}")"
       ramp_down="$(duration_to_seconds "${CAPACITY_RAMP_DOWN_DURATION:-1m}")"
@@ -166,6 +154,27 @@ profile_duration_seconds() {
       printf "0\n"
       ;;
   esac
+}
+
+append_prometheus_metrics() {
+  local report_file="$1"
+  local started_at="$2"
+  local ended_at="$3"
+
+  if [ -z "${PROMETHEUS_URL:-}" ]; then
+    return
+  fi
+
+  if [ ! -x "./scripts/fetch-prometheus-metrics.sh" ]; then
+    return
+  fi
+
+  ./scripts/fetch-prometheus-metrics.sh "${started_at}" "${ended_at}" >> "${report_file}" || {
+    {
+      printf "\n## Server-Side Metrics From Prometheus\n\n"
+      printf "- Failed to fetch Prometheus metrics. Check PROMETHEUS_URL, PROMETHEUS_INSTANCE, PROMETHEUS_NET_DEVICE and curl/jq availability.\n"
+    } >> "${report_file}"
+  }
 }
 
 show_progress() {
@@ -232,6 +241,7 @@ run_k6_profile() {
   local script="$2"
   local timestamp
   local started_at
+  local ended_at
   local result_file
   local report_file
   local log_file
@@ -270,6 +280,9 @@ run_k6_profile() {
   wait "${k6_pid}"
   k6_status=$?
   set -e
+
+  ended_at="$(date +%Y-%m-%dT%H:%M:%S%z)"
+  append_prometheus_metrics "${report_file}" "${started_at}" "${ended_at}"
 
   cat "${log_file}"
 
