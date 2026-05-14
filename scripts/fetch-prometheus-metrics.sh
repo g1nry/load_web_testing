@@ -105,16 +105,16 @@ kube_metrics_note="kube-state-metrics/cAdvisor not detected in Prometheus jobs"
 jobs="$(prom_jobs)"
 
 if [ -n "${app_filter}" ]; then
-  app_up_min="$(prom_query "min_over_time(up{${app_filter#,}}[${duration_seconds}s])")"
-  app_up_current="$(prom_query "up{${app_filter#,}}")"
+  app_up_min="$(prom_query "(min_over_time(up{${app_filter#,}}[${duration_seconds}s])) or vector(0)")"
+  app_up_current="$(prom_query "(up{${app_filter#,}}) or vector(0)")"
 fi
 
 if printf "%s\n" "${jobs}" | grep -Eq 'kube-state-metrics|cadvisor|kubelet'; then
   kube_metrics_note="queried"
-  restart_delta="$(prom_query "sum(increase(kube_pod_container_status_restarts_total{${kube_filter#,}}[${duration_seconds}s]))")"
-  oom_kube="$(prom_query "sum(max_over_time(kube_pod_container_status_last_terminated_reason{reason=\"OOMKilled\"${kube_filter}}[${duration_seconds}s]))")"
-  oom_events="$(prom_query "sum(increase(container_oom_events_total{${kube_filter#,}}[${duration_seconds}s]))")"
-  pod_failed_unknown="$(prom_query "sum(max_over_time(kube_pod_status_phase{phase=~\"Failed|Unknown\"${kube_filter}}[${duration_seconds}s]))")"
+  restart_delta="$(prom_query "(sum(kube_pod_container_status_restarts_total{${kube_filter#,}})) or vector(0)")"
+  oom_kube="$(prom_query "(sum(kube_pod_container_status_last_terminated_reason{reason=\"OOMKilled\"${kube_filter}})) or vector(0)")"
+  oom_events="$(prom_query "(sum(container_oom_events_total{${kube_filter#,}})) or vector(0)")"
+  pod_failed_unknown="$(prom_query "(sum(kube_pod_status_phase{phase=~\"Failed|Unknown\"${kube_filter}})) or vector(0)")"
 fi
 
 cat <<EOF
@@ -139,10 +139,10 @@ cat <<EOF
 
 | Metric | Value |
 | --- | ---: |
-| Container restart increase | $(fmt_count "${restart_delta}") |
-| OOMKilled containers | $(fmt_count "${oom_kube}") |
-| cAdvisor OOM events | $(fmt_count "${oom_events}") |
-| Pods Failed/Unknown | $(fmt_count "${pod_failed_unknown}") |
+| Container restart total at end | $(fmt_count "${restart_delta}") |
+| OOMKilled containers at end | $(fmt_count "${oom_kube}") |
+| cAdvisor OOM events total at end | $(fmt_count "${oom_events}") |
+| Pods Failed/Unknown at end | $(fmt_count "${pod_failed_unknown}") |
 | Pod health note | ${kube_metrics_note} |
 
 Prometheus range: ${started_at} - ${ended_at}
