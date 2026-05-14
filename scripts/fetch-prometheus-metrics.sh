@@ -26,9 +26,18 @@ query_timeout="${PROMETHEUS_QUERY_TIMEOUT:-10}"
 instance_filter=""
 device_filter='device!="lo"'
 kube_filter=""
+app_filter=""
 
 if [ -n "${PROMETHEUS_INSTANCE:-}" ]; then
   instance_filter=",instance=\"${PROMETHEUS_INSTANCE}\""
+fi
+
+if [ -n "${PROMETHEUS_APP_JOB:-}" ]; then
+  app_filter="${app_filter},job=\"${PROMETHEUS_APP_JOB}\""
+fi
+
+if [ -n "${PROMETHEUS_APP_INSTANCE:-}" ]; then
+  app_filter="${app_filter},instance=\"${PROMETHEUS_APP_INSTANCE}\""
 fi
 
 if [ -n "${PROMETHEUS_KUBE_NAMESPACE:-}" ]; then
@@ -57,6 +66,12 @@ prom_query() {
     || printf "nan\n"
 }
 
+prom_jobs() {
+  curl -fsS --max-time "${query_timeout}" "${PROMETHEUS_URL%/}/api/v1/label/job/values" 2>/dev/null \
+    | jq -r '.data[]?' \
+    || true
+}
+
 fmt_percent() {
   local value="$1"
   awk -v value="${value}" 'BEGIN { if (value == "nan" || value == "") print "n/a"; else printf "%.2f%%", value }'
@@ -80,10 +95,27 @@ rx_avg="$(prom_query "avg_over_time(((rate(node_network_receive_bytes_total{${de
 rx_max="$(prom_query "max_over_time(((rate(node_network_receive_bytes_total{${device_filter}${instance_filter}}[1m]) * 8) / 1000000)[${duration_seconds}s:${step}])")"
 tx_avg="$(prom_query "avg_over_time(((rate(node_network_transmit_bytes_total{${device_filter}${instance_filter}}[1m]) * 8) / 1000000)[${duration_seconds}s:${step}])")"
 tx_max="$(prom_query "max_over_time(((rate(node_network_transmit_bytes_total{${device_filter}${instance_filter}}[1m]) * 8) / 1000000)[${duration_seconds}s:${step}])")"
-restart_delta="$(prom_query "sum(increase(kube_pod_container_status_restarts_total{${kube_filter#,}}[${duration_seconds}s]))")"
-oom_kube="$(prom_query "sum(max_over_time(kube_pod_container_status_last_terminated_reason{reason=\"OOMKilled\"${kube_filter}}[${duration_seconds}s]))")"
-oom_events="$(prom_query "sum(increase(container_oom_events_total{${kube_filter#,}}[${duration_seconds}s]))")"
-pod_failed_unknown="$(prom_query "sum(max_over_time(kube_pod_status_phase{phase=~\"Failed|Unknown\"${kube_filter}}[${duration_seconds}s]))")"
+app_up_min="nan"
+app_up_current="nan"
+restart_delta="nan"
+oom_kube="nan"
+oom_events="nan"
+pod_failed_unknown="nan"
+kube_metrics_note="kube-state-metrics/cAdvisor not detected in Prometheus jobs"
+jobs="$(prom_jobs)"
+
+if [ -n "${app_filter}" ]; then
+  app_up_min="$(prom_query "min_over_time(up{${app_filter#,}}[${duration_seconds}s])")"
+  app_up_current="$(prom_query "up{${app_filter#,}}")"
+fi
+
+if printf "%s\n" "${jobs}" | grep -Eq 'kube-state-metrics|cadvisor|kubelet'; then
+  kube_metrics_note="queried"
+  restart_delta="$(prom_query "sum(increase(kube_pod_container_status_restarts_total{${kube_filter#,}}[${duration_seconds}s]))")"
+  oom_kube="$(prom_query "sum(max_over_time(kube_pod_container_status_last_terminated_reason{reason=\"OOMKilled\"${kube_filter}}[${duration_seconds}s]))")"
+  oom_events="$(prom_query "sum(increase(container_oom_events_total{${kube_filter#,}}[${duration_seconds}s]))")"
+  pod_failed_unknown="$(prom_query "sum(max_over_time(kube_pod_status_phase{phase=~\"Failed|Unknown\"${kube_filter}}[${duration_seconds}s]))")"
+fi
 
 cat <<EOF
 
@@ -96,6 +128,13 @@ cat <<EOF
 | Network RX | $(fmt_mbps "${rx_avg}") | $(fmt_mbps "${rx_max}") |
 | Network TX | $(fmt_mbps "${tx_avg}") | $(fmt_mbps "${tx_max}") |
 
+## Application Target Health From Prometheus
+
+| Metric | Value |
+| --- | ---: |
+| App target up min | $(fmt_count "${app_up_min}") |
+| App target up current | $(fmt_count "${app_up_current}") |
+
 ## Pod Health From Prometheus
 
 | Metric | Value |
@@ -104,10 +143,12 @@ cat <<EOF
 | OOMKilled containers | $(fmt_count "${oom_kube}") |
 | cAdvisor OOM events | $(fmt_count "${oom_events}") |
 | Pods Failed/Unknown | $(fmt_count "${pod_failed_unknown}") |
+| Pod health note | ${kube_metrics_note} |
 
 Prometheus range: ${started_at} - ${ended_at}
 Prometheus URL: ${PROMETHEUS_URL}
 Instance filter: ${PROMETHEUS_INSTANCE:-all}
 Network device filter: ${PROMETHEUS_NET_DEVICE:-non-loopback devices}
 Kubernetes filter: namespace=${PROMETHEUS_KUBE_NAMESPACE:-all}, pod=${PROMETHEUS_KUBE_POD:-all}, container=${PROMETHEUS_KUBE_CONTAINER:-all}
+Application target filter: job=${PROMETHEUS_APP_JOB:-not configured}, instance=${PROMETHEUS_APP_INSTANCE:-not configured}
 EOF

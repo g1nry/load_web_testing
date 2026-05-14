@@ -119,11 +119,13 @@ LOAD_ENDPOINTS=/
 Если Prometheus доступен напрямую, добавь в `.env`:
 
 ```bash
-PROMETHEUS_URL=http://81.26.176.68:9090
+PROMETHEUS_URL=http://IP:9090
 PROMETHEUS_INSTANCE=
 PROMETHEUS_NET_DEVICE=
 PROMETHEUS_QUERY_STEP=30s
 PROMETHEUS_QUERY_TIMEOUT=10
+PROMETHEUS_APP_JOB=
+PROMETHEUS_APP_INSTANCE=
 PROMETHEUS_KUBE_NAMESPACE=
 PROMETHEUS_KUBE_POD=
 PROMETHEUS_KUBE_CONTAINER=
@@ -140,6 +142,13 @@ PROMETHEUS_KUBE_CONTAINER=
 - pods in Failed/Unknown phase.
 
 `PROMETHEUS_INSTANCE` можно оставить пустым, если нужно брать все instance. `PROMETHEUS_NET_DEVICE` можно оставить пустым, тогда будут использованы non-loopback network devices.
+
+`PROMETHEUS_APP_JOB` и `PROMETHEUS_APP_INSTANCE` нужны для проверки scrape health самого приложения через `up{...}`. Для текущего Prometheus это, например:
+
+```bash
+PROMETHEUS_APP_JOB=podinfo
+PROMETHEUS_APP_INSTANCE=10.103.120.187:9898
+```
 
 `PROMETHEUS_KUBE_NAMESPACE`, `PROMETHEUS_KUBE_POD`, `PROMETHEUS_KUBE_CONTAINER` нужны, если в Prometheus есть kube-state-metrics/cAdvisor и нужно сузить рестарты/OOM до конкретного сервиса. `PROMETHEUS_KUBE_POD` и `PROMETHEUS_KUBE_CONTAINER` работают как regex.
 
