@@ -99,6 +99,7 @@ TARGET_URL=https://example.internal
 REQUEST_TIMEOUT=5s
 LOAD_ENDPOINTS=/
 ENABLE_CACHE_BUSTER=false
+ENDPOINT_AUDIT_RETRIES=1
 
 TEST_PROFILES=smoke,discovery
 ALLOW_HIGH_IMPACT_TESTS=false
@@ -113,6 +114,8 @@ LOAD_ENDPOINTS=/
 Перед pressure-тестами сначала запусти discovery и оставь только реально доступные пути с `2xx/3xx`. Endpoint'ы с `404`, `401`, `403` или редиректами в login лучше не добавлять в pressure-профили: k6 будет считать их failed requests.
 
 `ENABLE_CACHE_BUSTER=true` добавляет уникальный query parameter к запросам. Включай это только если нужно специально обходить cache: уникальные URL резко увеличивают cardinality метрик k6 и могут нагрузить runner.
+
+`ENDPOINT_AUDIT_RETRIES` задает количество попыток preflight-проверки endpoint'ов перед pressure-тестом. Для `memory` wrapper по умолчанию делает 3 попытки, потому delay endpoint'ы могут отвечать медленно или нестабильно.
 
 ## Prometheus / Grafana
 

@@ -220,6 +220,22 @@ profile_endpoints() {
   printf "%s\n" "${value}"
 }
 
+profile_request_timeout() {
+  local profile="$1"
+
+  case "${profile}" in
+    memory)
+      printf "%s\n" "${MEMORY_REQUEST_TIMEOUT:-${REQUEST_TIMEOUT:-10s}}"
+      ;;
+    network)
+      printf "%s\n" "${NETWORK_REQUEST_TIMEOUT:-${REQUEST_TIMEOUT:-10s}}"
+      ;;
+    *)
+      printf "%s\n" "${REQUEST_TIMEOUT:-10s}"
+      ;;
+  esac
+}
+
 is_control_endpoint() {
   local endpoint="$1"
   local clean_endpoint="${endpoint%%\?*}"
@@ -299,6 +315,7 @@ audit_profile_endpoints() {
   local network_method="${NETWORK_METHOD:-GET}"
   local network_payload_bytes="${NETWORK_PAYLOAD_BYTES:-0}"
   local payload_file=""
+  local audit_retries="${ENDPOINT_AUDIT_RETRIES:-1}"
 
   if [ -z "${target_url}" ]; then
     return
@@ -314,13 +331,16 @@ audit_profile_endpoints() {
 
   raw_endpoints="$(profile_endpoints "${profile}")"
   normalized_target="${target_url%/}"
-  curl_timeout="$(duration_to_seconds "${REQUEST_TIMEOUT:-10s}")"
+  curl_timeout="$(duration_to_seconds "$(profile_request_timeout "${profile}")")"
   if [ "${curl_timeout}" -le 0 ]; then
     curl_timeout="10"
   fi
+  if [ "${profile}" = "memory" ] && [ "${ENDPOINT_AUDIT_RETRIES:-}" = "" ]; then
+    audit_retries=3
+  fi
 
   printf "endpoint audit:\n"
-  printf "  %-22s %-6s %-10s %s\n" "endpoint" "status" "bytes" "time"
+  printf "  %-22s %-6s %-10s %-8s %s\n" "endpoint" "status" "bytes" "attempt" "time"
 
   if [ "${profile}" = "network" ] && [ "${network_method^^}" = "POST" ] && [ "${network_payload_bytes}" -gt 0 ]; then
     payload_file="$(mktemp)"
@@ -343,27 +363,40 @@ audit_profile_endpoints() {
       url="${normalized_target}/${endpoint}"
     fi
 
-    tmp_file="$(mktemp)"
-    set +e
-    if [ -n "${payload_file}" ]; then
-      curl_output="$(curl -sS -L -X POST --data-binary "@${payload_file}" -H "Content-Type: ${NETWORK_CONTENT_TYPE:-text/plain}" -o "${tmp_file}" -w "%{http_code} %{size_download} %{time_total}" --max-time "${curl_timeout}" "${url}" 2>/dev/null)"
-    else
-      curl_output="$(curl -sS -L -o "${tmp_file}" -w "%{http_code} %{size_download} %{time_total}" --max-time "${curl_timeout}" "${url}" 2>/dev/null)"
+    local attempt=1
+    while [ "${attempt}" -le "${audit_retries}" ]; do
+      tmp_file="$(mktemp)"
+      set +e
+      if [ -n "${payload_file}" ]; then
+        curl_output="$(curl -sS -L -X POST --data-binary "@${payload_file}" -H "Content-Type: ${NETWORK_CONTENT_TYPE:-text/plain}" -o "${tmp_file}" -w "%{http_code} %{size_download} %{time_total}" --max-time "${curl_timeout}" "${url}" 2>/dev/null)"
+      else
+        curl_output="$(curl -sS -L -o "${tmp_file}" -w "%{http_code} %{size_download} %{time_total}" --max-time "${curl_timeout}" "${url}" 2>/dev/null)"
+      fi
+      local curl_status=$?
+      set -e
+
+      if [ "${curl_status}" -ne 0 ] || [ -z "${curl_output}" ]; then
+        http_code="000"
+        size_download="0"
+        time_total="-"
+      else
+        read -r http_code size_download time_total <<< "${curl_output}"
+      fi
+
+      rm -f "${tmp_file}"
+
+      if [ "${http_code}" -ge 200 ] && [ "${http_code}" -lt 400 ]; then
+        break
+      fi
+
+      attempt=$((attempt + 1))
+    done
+
+    if [ "${attempt}" -gt "${audit_retries}" ]; then
+      attempt="${audit_retries}"
     fi
-    local curl_status=$?
-    set -e
 
-    if [ "${curl_status}" -ne 0 ] || [ -z "${curl_output}" ]; then
-      http_code="000"
-      size_download="0"
-      time_total="-"
-    else
-      read -r http_code size_download time_total <<< "${curl_output}"
-    fi
-
-    rm -f "${tmp_file}"
-
-    printf "  %-22s %-6s %-10s %s\n" "${endpoint}" "${http_code}" "${size_download}" "${time_total}s"
+    printf "  %-22s %-6s %-10s %-8s %s\n" "${endpoint}" "${http_code}" "${size_download}" "${attempt}/${audit_retries}" "${time_total}s"
 
     if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 400 ]; then
       bad_status_count=$((bad_status_count + 1))
