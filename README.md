@@ -123,6 +123,10 @@ PROMETHEUS_URL=http://81.26.176.68:9090
 PROMETHEUS_INSTANCE=
 PROMETHEUS_NET_DEVICE=
 PROMETHEUS_QUERY_STEP=30s
+PROMETHEUS_QUERY_TIMEOUT=10
+PROMETHEUS_KUBE_NAMESPACE=
+PROMETHEUS_KUBE_POD=
+PROMETHEUS_KUBE_CONTAINER=
 ```
 
 Если `PROMETHEUS_URL` задан, wrapper после k6-прогона запросит Prometheus за time range теста и допишет в Markdown-отчет:
@@ -130,9 +134,14 @@ PROMETHEUS_QUERY_STEP=30s
 - CPU usage avg/max;
 - Memory usage avg/max;
 - Network RX avg/max;
-- Network TX avg/max.
+- Network TX avg/max;
+- container restarts;
+- OOMKilled / cAdvisor OOM events;
+- pods in Failed/Unknown phase.
 
 `PROMETHEUS_INSTANCE` можно оставить пустым, если нужно брать все instance. `PROMETHEUS_NET_DEVICE` можно оставить пустым, тогда будут использованы non-loopback network devices.
+
+`PROMETHEUS_KUBE_NAMESPACE`, `PROMETHEUS_KUBE_POD`, `PROMETHEUS_KUBE_CONTAINER` нужны, если в Prometheus есть kube-state-metrics/cAdvisor и нужно сузить рестарты/OOM до конкретного сервиса. `PROMETHEUS_KUBE_POD` и `PROMETHEUS_KUBE_CONTAINER` работают как regex.
 
 Ссылку на Grafana dashboard можно добавить отдельно:
 
@@ -159,13 +168,13 @@ GRAFANA_DASHBOARD_URL=http://81.26.176.68:3000/d/rYdddlPWk/node-exporter-full?or
 
 `throughput` — RPS-oriented профиль на `ramping-arrival-rate`. Нужен, чтобы понять, сколько запросов в секунду выдерживает сервис.
 
-`cpu` — CPU pressure через высокий RPS и опциональное отключение connection reuse. Нужен endpoint, который реально заставляет backend выполнять работу. Healthcheck/status endpoint'ы обычно почти не грузят CPU.
+`cpu` — CPU pressure через высокий RPS и опциональное отключение connection reuse. Нужен endpoint, который реально заставляет backend выполнять работу. Для текущего сервиса можно использовать `/metrics`, если команда подтвердила, что его сбор заметно грузит CPU.
 
-`memory` — memory/concurrency pressure. Требует endpoint'ов, которые создают заметную нагрузку на память: большие ответы, аллокации, кэш, тяжелые выборки, long-lived обработка. Если `MEMORY_ENDPOINTS` не задан или ответ слишком маленький, тест выведет предупреждение.
+`memory` — memory/concurrency pressure. Для текущего сервиса можно использовать `/delay/{n}`: много одновременных долгих запросов держат соединения и обработчики открытыми. Если `MEMORY_ENDPOINTS` не задан, тест выведет предупреждение.
 
-`network` — bandwidth pressure. Требует endpoint'ов с большими ответами. Не используй `/metrics`, `/ping`, `/healthz`, `/readyz`, `/version`: такие endpoint'ы могут грузить системный слой и сбор метрик, но не дают честный bandwidth-тест.
+`network` — bandwidth pressure. Для текущего сервиса можно использовать `/api/echo` с POST payload, если endpoint возвращает тело запроса обратно. Не используй `/metrics`, `/ping`, `/healthz`, `/readyz`, `/version` для network.
 
-`capacity` — controlled поиск failure threshold по RPS-ступеням. Задача: найти диапазон между последней стабильной нагрузкой и первой проблемной нагрузкой.
+`capacity` — controlled поиск failure threshold по отдельным RPS-ступеням. Задача: автоматически выделить диапазон между последней стабильной нагрузкой и первой проблемной нагрузкой.
 
 Все pressure-профили считаются high-impact:
 
@@ -200,7 +209,7 @@ THROUGHPUT_MAX_VUS=500
 ### CPU
 
 ```bash
-CPU_ENDPOINTS=/cpu-heavy
+CPU_ENDPOINTS=/metrics
 CPU_RATE_STEPS=25,50,100,200
 CPU_RAMP_DURATION=30s
 CPU_HOLD_DURATION=1m
@@ -210,27 +219,30 @@ CPU_MAX_VUS=1000
 CPU_NO_CONNECTION_REUSE=false
 ```
 
-Если dedicated CPU endpoint еще не готов, можно временно поставить обычный рабочий endpoint, но результат нужно читать как HTTP/RPS pressure, а не как полноценный CPU pressure.
+Если `/metrics` действительно тяжелый для приложения, его можно использовать как CPU-pressure endpoint. Если он легкий или отдается не приложением, результат нужно читать как HTTP/RPS pressure, а не как полноценный CPU pressure.
 
 `CPU_NO_CONNECTION_REUSE=true` делает тест гораздо жестче по TCP/NAT и может положить сеть runner'а раньше, чем будет найден CPU-предел сервиса. Включай это только отдельным согласованным прогоном.
 
 ### Memory
 
 ```bash
-MEMORY_ENDPOINTS=/memory-heavy
+MEMORY_ENDPOINTS=/delay/30
 MEMORY_VUS=300
 MEMORY_DURATION=10m
-MEMORY_REQUEST_TIMEOUT=15s
+MEMORY_REQUEST_TIMEOUT=45s
 MEMORY_SLEEP_SECONDS=0
-MEMORY_MIN_RESPONSE_BYTES=1024
+MEMORY_MIN_RESPONSE_BYTES=0
 ```
 
-Если команда разработки еще не добавила memory-heavy endpoint, профиль можно запустить, но результат нужно считать слабым/непоказательным.
+Для `/delay/{n}` выставляй `MEMORY_REQUEST_TIMEOUT` больше `n`, иначе runner сам оборвет запросы. `MEMORY_MIN_RESPONSE_BYTES=0` отключает проверку размера ответа, потому для delay важна не величина payload, а количество одновременно открытых запросов.
 
 ### Network
 
 ```bash
-NETWORK_ENDPOINTS=/large-response
+NETWORK_ENDPOINTS=/api/echo
+NETWORK_METHOD=POST
+NETWORK_PAYLOAD_BYTES=65536
+NETWORK_CONTENT_TYPE=text/plain
 NETWORK_RATE=200
 NETWORK_DURATION=5m
 NETWORK_PRE_ALLOCATED_VUS=100
@@ -239,19 +251,30 @@ NETWORK_REQUEST_TIMEOUT=15s
 NETWORK_MIN_RESPONSE_BYTES=10240
 ```
 
-Для network pressure нужен endpoint, который отдает достаточно большой payload.
+Для network pressure нужен endpoint, который отдает достаточно большой payload. Если `/api/echo` возвращает отправленное тело, размер нагрузки регулируется через `NETWORK_PAYLOAD_BYTES`.
 
 ### Capacity
 
 ```bash
 CAPACITY_ENDPOINTS=/
 CAPACITY_RATE_STEPS=50,100,200,400,800
-CAPACITY_RAMP_DURATION=30s
-CAPACITY_HOLD_DURATION=1m
-CAPACITY_RAMP_DOWN_DURATION=1m
+CAPACITY_STEP_DURATION=1m
+CAPACITY_GRACEFUL_STOP=30s
+CAPACITY_FAILURE_RATE_LIMIT=0.05
+CAPACITY_P95_LIMIT_MS=1000
 CAPACITY_PRE_ALLOCATED_VUS=100
 CAPACITY_MAX_VUS=2000
 ```
+
+Capacity запускает каждую ступень как отдельный k6 scenario: `capacity_1_50_rps`, `capacity_2_100_rps` и так далее. Markdown-отчет строит таблицу по ступеням и выводит:
+
+- last stable load;
+- first failing load;
+- failure rate;
+- p95 latency;
+- dropped iterations.
+
+Если все ступени stable, значит окно нестабильности не найдено: нужно расширить `CAPACITY_RATE_STEPS`, увеличить длительность ступени или использовать более тяжелые endpoint'ы.
 
 ## Запуск
 
@@ -330,6 +353,7 @@ Markdown-отчет содержит:
 - data sent / received;
 - среднюю сетевую нагрузку runner'а;
 - thresholds;
+- capacity window по RPS-ступеням для `capacity`;
 - Prometheus server-side метрики, если `PROMETHEUS_URL` задан;
 - поля для выводов по capacity/failure threshold.
 
@@ -390,15 +414,19 @@ for f in tests/*.js; do k6 inspect -e TARGET_URL=https://example.invalid "$f" >/
 
 `http_req_failed` красный, но checks зеленые — часто в endpoint'ы попали 4xx ответы. Для pressure-профилей оставляй только endpoint'ы, которые дают 2xx/3xx.
 
-CPU почти не растет в Grafana — скорее всего профиль бьет по легким endpoint'ам (`/`, `/ping`, `/healthz`, `/version`). Для CPU pressure нужен отдельный endpoint с реальной вычислительной работой или тяжелый рабочий сценарий приложения.
+CPU почти не растет в Grafana — скорее всего профиль бьет по легким endpoint'ам (`/`, `/ping`, `/healthz`, `/version`). Для текущего сервиса попробуй `CPU_ENDPOINTS=/metrics`, если именно приложение генерирует этот ответ и это согласовано с командой.
 
 Network поднимает system load, но bandwidth маленький — проверь, что в `NETWORK_ENDPOINTS` нет `/metrics` и других служебных endpoint'ов. `/metrics` может грузить сбор метрик и kernel/system time, но это плохой источник сетевой нагрузки.
+
+Capacity не находит окно нестабильности — это нормально для простого или недогруженного сервиса. Значит все заданные RPS-ступени прошли по критериям `CAPACITY_FAILURE_RATE_LIMIT`, `CAPACITY_P95_LIMIT_MS` и dropped iterations. Подними верхние ступени, увеличь `CAPACITY_STEP_DURATION` или используй endpoint, который реально проходит через бизнес-логику сервиса.
 
 High-cardinality warning от k6 — проверь, что `ENABLE_CACHE_BUSTER=false`. Уникальные query params создают слишком много time series.
 
 Pressure-профиль пропущен в suite — включи `ALLOW_HIGH_IMPACT_TESTS=true`.
 
 Prometheus-метрики не попали в отчет — проверь `PROMETHEUS_URL`, `PROMETHEUS_INSTANCE`, `PROMETHEUS_NET_DEVICE`, доступность `/api/v1/query`, `curl` и `jq`.
+
+OOM/restart в отчете `n/a` — в Prometheus может не быть kube-state-metrics/cAdvisor или не настроены `PROMETHEUS_KUBE_NAMESPACE`, `PROMETHEUS_KUBE_POD`, `PROMETHEUS_KUBE_CONTAINER`.
 
 ## Структура
 

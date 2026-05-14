@@ -78,6 +78,128 @@ function thresholdsStatus(data) {
   return failed;
 }
 
+function thresholdOk(data, metricName) {
+  const thresholds = (data.metrics && data.metrics[metricName] && data.metrics[metricName].thresholds) || {};
+  const entries = Object.values(thresholds);
+
+  if (entries.length === 0) {
+    return true;
+  }
+
+  return entries.every((threshold) => threshold.ok);
+}
+
+function metricByScenarioName(baseMetric, scenario) {
+  return `${baseMetric}{scenario:${scenario}}`;
+}
+
+function capacitySteps(data) {
+  const steps = [];
+  const seen = new Set();
+
+  for (const metricName of Object.keys(data.metrics || {})) {
+    const match = metricName.match(/\{scenario:(capacity_(\d+)_(\d+)_rps)\}/);
+
+    if (!match) {
+      continue;
+    }
+
+    const scenario = match[1];
+    if (seen.has(scenario)) {
+      continue;
+    }
+
+    seen.add(scenario);
+    steps.push({
+      scenario,
+      index: Number(match[2]),
+      rateTarget: Number(match[3]),
+    });
+  }
+
+  return steps
+    .sort((left, right) => left.index - right.index)
+    .map((step) => {
+      const failedMetric = metricByScenarioName('http_req_failed', step.scenario);
+      const durationMetric = metricByScenarioName('http_req_duration', step.scenario);
+      const droppedMetric = metricByScenarioName('dropped_iterations', step.scenario);
+      const requestsMetric = metricByScenarioName('http_reqs', step.scenario);
+      const failureRate = value(data, failedMetric, 'rate', NaN);
+      const p95 = value(data, durationMetric, 'p(95)', NaN);
+      const dropped = value(data, droppedMetric, 'count', 0);
+      const requestCount = value(data, requestsMetric, 'count', NaN);
+      const actualRps = value(data, requestsMetric, 'rate', NaN);
+      const failedOk = thresholdOk(data, failedMetric);
+      const p95Ok = thresholdOk(data, durationMetric);
+      const droppedOk = thresholdOk(data, droppedMetric);
+
+      return {
+        ...step,
+        failureRate,
+        p95,
+        dropped,
+        requestCount,
+        actualRps,
+        stable: failedOk && p95Ok && droppedOk,
+      };
+    });
+}
+
+function buildCapacityAnalysis(data) {
+  const profile = __ENV.K6_PROFILE || '';
+
+  if (profile !== 'capacity') {
+    return `## Capacity / Failure Threshold Notes
+
+- Last stable load: TODO
+- First failing load: TODO
+- Failure criterion: TODO
+- Evidence: TODO
+`;
+  }
+
+  const steps = capacitySteps(data);
+
+  if (steps.length === 0) {
+    return `## Capacity / Failure Threshold Notes
+
+- Last stable load: not detected
+- First failing load: not detected
+- Failure criterion: per-step thresholds were not found in the k6 summary
+- Evidence: check capacity scenario configuration and summary JSON
+`;
+  }
+
+  let lastStable = null;
+  let firstFailing = null;
+
+  for (const step of steps) {
+    if (step.stable) {
+      lastStable = step;
+      continue;
+    }
+
+    firstFailing = step;
+    break;
+  }
+
+  const rows = steps
+    .map((step) => `| ${step.rateTarget} | ${formatNumber(step.actualRps)} | ${formatCount(step.requestCount)} | ${formatPercent(step.failureRate)} | ${formatMs(step.p95)} | ${formatCount(step.dropped)} | ${step.stable ? 'stable' : 'unstable'} |`)
+    .join('\n');
+
+  return `## Capacity / Failure Threshold Notes
+
+- Last stable load: ${lastStable ? `${lastStable.rateTarget} RPS` : 'none'}
+- First failing load: ${firstFailing ? `${firstFailing.rateTarget} RPS` : 'not reached'}
+- Failure criterion: per-step http failure rate, p95 latency and dropped iterations thresholds
+- Evidence: see per-step table below
+
+| Target RPS | Actual RPS | Requests | Failure rate | p95 latency | Dropped iterations | Status |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+${rows}
+`;
+}
+
 function endpointList() {
   const profile = __ENV.K6_PROFILE || '';
   const endpointEnvByProfile = {
@@ -188,12 +310,7 @@ ${failedThresholds.length === 0 ? '- All configured thresholds passed.' : failed
 | 5xx / timeout correlation | TODO |
 | Notes | TODO |
 
-## Capacity / Failure Threshold Notes
-
-- Last stable load: TODO
-- First failing load: TODO
-- Failure criterion: TODO
-- Evidence: TODO
+${buildCapacityAnalysis(data)}
 `;
 }
 

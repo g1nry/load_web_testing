@@ -148,12 +148,10 @@ profile_duration_seconds() {
       duration_to_seconds "${NETWORK_DURATION:-5m}"
       ;;
     capacity)
-      local steps ramp hold ramp_down
+      local steps step_duration
       steps="$(capacity_steps_count "${CAPACITY_RATE_STEPS:-50,100,200,400,800}")"
-      ramp="$(duration_to_seconds "${CAPACITY_RAMP_DURATION:-30s}")"
-      hold="$(duration_to_seconds "${CAPACITY_HOLD_DURATION:-1m}")"
-      ramp_down="$(duration_to_seconds "${CAPACITY_RAMP_DOWN_DURATION:-1m}")"
-      printf "%s\n" "$((steps * (ramp + hold) + ramp_down))"
+      step_duration="$(duration_to_seconds "${CAPACITY_STEP_DURATION:-${CAPACITY_HOLD_DURATION:-1m}}")"
+      printf "%s\n" "$((steps * step_duration))"
       ;;
     *)
       printf "0\n"
@@ -236,6 +234,34 @@ is_control_endpoint() {
   esac
 }
 
+is_light_cpu_endpoint() {
+  local endpoint="$1"
+  local clean_endpoint="${endpoint%%\?*}"
+
+  case "${clean_endpoint}" in
+    /|/ping|/healthz|/readyz|/version)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_forbidden_network_endpoint() {
+  local endpoint="$1"
+  local clean_endpoint="${endpoint%%\?*}"
+
+  case "${clean_endpoint}" in
+    /ping|/healthz|/readyz|/version|/metrics)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 endpoint_audit_should_fail_on_status() {
   local profile="$1"
 
@@ -264,10 +290,15 @@ audit_profile_endpoints() {
   local time_total
   local bad_status_count=0
   local control_count=0
+  local light_cpu_count=0
+  local forbidden_network_count=0
   local small_network_count=0
   local endpoint_count=0
   local min_network_bytes="${NETWORK_MIN_RESPONSE_BYTES:-10240}"
   local curl_timeout
+  local network_method="${NETWORK_METHOD:-GET}"
+  local network_payload_bytes="${NETWORK_PAYLOAD_BYTES:-0}"
+  local payload_file=""
 
   if [ -z "${target_url}" ]; then
     return
@@ -291,6 +322,11 @@ audit_profile_endpoints() {
   printf "endpoint audit:\n"
   printf "  %-22s %-6s %-10s %s\n" "endpoint" "status" "bytes" "time"
 
+  if [ "${profile}" = "network" ] && [ "${network_method^^}" = "POST" ] && [ "${network_payload_bytes}" -gt 0 ]; then
+    payload_file="$(mktemp)"
+    head -c "${network_payload_bytes}" /dev/zero | tr '\0' 'x' > "${payload_file}"
+  fi
+
   IFS=',' read -ra endpoints <<< "${raw_endpoints}"
   for endpoint in "${endpoints[@]}"; do
     endpoint="${endpoint// /}"
@@ -309,7 +345,11 @@ audit_profile_endpoints() {
 
     tmp_file="$(mktemp)"
     set +e
-    curl_output="$(curl -sS -L -o "${tmp_file}" -w "%{http_code} %{size_download} %{time_total}" --max-time "${curl_timeout}" "${url}" 2>/dev/null)"
+    if [ -n "${payload_file}" ]; then
+      curl_output="$(curl -sS -L -X POST --data-binary "@${payload_file}" -H "Content-Type: ${NETWORK_CONTENT_TYPE:-text/plain}" -o "${tmp_file}" -w "%{http_code} %{size_download} %{time_total}" --max-time "${curl_timeout}" "${url}" 2>/dev/null)"
+    else
+      curl_output="$(curl -sS -L -o "${tmp_file}" -w "%{http_code} %{size_download} %{time_total}" --max-time "${curl_timeout}" "${url}" 2>/dev/null)"
+    fi
     local curl_status=$?
     set -e
 
@@ -333,10 +373,22 @@ audit_profile_endpoints() {
       control_count=$((control_count + 1))
     fi
 
+    if is_light_cpu_endpoint "${clean_endpoint}"; then
+      light_cpu_count=$((light_cpu_count + 1))
+    fi
+
+    if is_forbidden_network_endpoint "${clean_endpoint}"; then
+      forbidden_network_count=$((forbidden_network_count + 1))
+    fi
+
     if [ "${profile}" = "network" ] && [ "${size_download}" -lt "${min_network_bytes}" ]; then
       small_network_count=$((small_network_count + 1))
     fi
   done
+
+  if [ -n "${payload_file}" ]; then
+    rm -f "${payload_file}"
+  fi
 
   printf "\n"
 
@@ -350,13 +402,13 @@ audit_profile_endpoints() {
     return 1
   fi
 
-  if [ "${profile}" = "cpu" ] && [ "${control_count}" -eq "${endpoint_count}" ]; then
+  if [ "${profile}" = "cpu" ] && [ "${light_cpu_count}" -eq "${endpoint_count}" ]; then
     printf "endpoint audit warning: CPU profile uses only light/control endpoints. It will mostly test routing and HTTP overhead, not service CPU saturation.\n\n" >&2
   fi
 
   if [ "${profile}" = "network" ]; then
-    if [ "${control_count}" -gt 0 ]; then
-      printf "endpoint audit failed: network profile includes control endpoints such as /metrics, /ping, /healthz, /readyz or /version. Use dedicated large-response endpoints instead.\n\n" >&2
+    if [ "${forbidden_network_count}" -gt 0 ]; then
+      printf "endpoint audit failed: network profile includes control endpoints such as /metrics, /ping, /healthz, /readyz or /version. Use /api/echo or another large-response endpoint instead.\n\n" >&2
       return 1
     fi
 

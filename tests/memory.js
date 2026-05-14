@@ -9,7 +9,7 @@ const memoryEndpointsConfigured = Boolean(__ENV.MEMORY_ENDPOINTS);
 const endpoints = getEnvEndpoints('MEMORY_ENDPOINTS', __ENV.LOAD_ENDPOINTS || '/');
 const requestTimeout = __ENV.MEMORY_REQUEST_TIMEOUT || __ENV.REQUEST_TIMEOUT || '15s';
 const sleepSeconds = Number(__ENV.MEMORY_SLEEP_SECONDS || '0');
-const minResponseBytes = Number(__ENV.MEMORY_MIN_RESPONSE_BYTES || '1024');
+const minResponseBytes = Number(__ENV.MEMORY_MIN_RESPONSE_BYTES || '0');
 
 if (!memoryEndpointsConfigured) {
   console.warn('MEMORY_ENDPOINTS is not set. Memory profile is running against LOAD_ENDPOINTS fallback and may not create useful RAM pressure.');
@@ -34,14 +34,14 @@ export default function () {
   });
   const bodyLength = response.body ? response.body.length : 0;
 
-  if (__VU === 1 && __ITER < 3 && bodyLength < minResponseBytes) {
+  if (minResponseBytes > 0 && __VU === 1 && __ITER < 3 && bodyLength < minResponseBytes) {
     console.warn(`Memory endpoint response is only ${bodyLength} bytes. Configure MEMORY_ENDPOINTS to hit RAM-heavy endpoints.`);
   }
 
   check(response, {
     'server responded': (res) => res.status > 0,
     'status is 2xx or 3xx': (res) => res.status >= 200 && res.status < 400,
-    'response is large enough for memory pressure': () => bodyLength >= minResponseBytes,
+    'response is large enough for memory pressure': () => minResponseBytes === 0 || bodyLength >= minResponseBytes,
   });
 
   if (sleepSeconds > 0) {
