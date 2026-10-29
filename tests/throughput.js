@@ -1,8 +1,9 @@
+import { diagnosticOptions, recordResponseSize } from '../config/diagnostics.js';
 import http from 'k6/http';
 import { check } from 'k6';
 import { appendCacheBuster, buildUrl, getEnvEndpoints, getTargetUrl, pickEndpoint } from '../config/endpoints.js';
 import { buildSummary } from '../config/report.js';
-import { throughputThresholds } from '../config/thresholds.js';
+import { throughputThresholds, withStopThresholds } from '../config/thresholds.js';
 
 const targetUrl = getTargetUrl();
 const endpoints = getEnvEndpoints('THROUGHPUT_ENDPOINTS', __ENV.LOAD_ENDPOINTS || '/');
@@ -29,6 +30,7 @@ function getStages() {
 }
 
 export const options = {
+  ...diagnosticOptions,
   scenarios: {
     throughput: {
       executor: 'ramping-arrival-rate',
@@ -38,15 +40,18 @@ export const options = {
       stages: getStages(),
     },
   },
-  thresholds: throughputThresholds,
+  thresholds: withStopThresholds(throughputThresholds),
 };
 
 export default function () {
   const endpoint = appendCacheBuster(pickEndpoint(endpoints));
   const response = http.get(buildUrl(targetUrl, endpoint), {
     timeout: requestTimeout,
+    responseType: 'binary',
     tags: { endpoint: endpoint.split('?')[0] },
   });
+
+  recordResponseSize(response, endpoint);
 
   check(response, {
     'status is 2xx or 3xx': (res) => res.status >= 200 && res.status < 400,

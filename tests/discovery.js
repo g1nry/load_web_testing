@@ -1,3 +1,4 @@
+import { diagnosticOptions, recordResponseSize } from '../config/diagnostics.js';
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { defaultEndpoints, getTargetUrl, buildUrl } from '../config/endpoints.js';
@@ -9,6 +10,7 @@ const requestTimeout = __ENV.REQUEST_TIMEOUT || '5s';
 const sleepSeconds = Number(__ENV.SLEEP_SECONDS || '1');
 
 export const options = {
+  ...diagnosticOptions,
   vus: Number(__ENV.DISCOVERY_VUS || '1'),
   duration: __ENV.DISCOVERY_DURATION || '10s',
   thresholds: discoveryThresholds,
@@ -20,14 +22,17 @@ export default function () {
 
     const response = http.get(url, {
       timeout: requestTimeout,
+      responseType: 'binary',
       tags: {
         endpoint,
       },
     });
 
+    recordResponseSize(response, endpoint);
+
     check(response, {
       [`${endpoint} responded`]: (res) => res.status > 0,
-      [`${endpoint} is not server error`]: (res) => res.status < 500,
+      [`${endpoint} is not server error`]: (res) => res.status > 0 && res.status < 500,
     });
 
     console.log(`${endpoint} -> HTTP ${response.status}`);

@@ -1,8 +1,9 @@
+import { diagnosticOptions, recordResponseSize } from '../config/diagnostics.js';
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { appendCacheBuster, buildUrl, getEnvEndpoints, getTargetUrl, pickEndpoint } from '../config/endpoints.js';
 import { buildSummary } from '../config/report.js';
-import { memoryThresholds } from '../config/thresholds.js';
+import { memoryThresholds, withStopThresholds } from '../config/thresholds.js';
 
 const targetUrl = getTargetUrl();
 const memoryEndpointsConfigured = Boolean(__ENV.MEMORY_ENDPOINTS);
@@ -16,6 +17,7 @@ if (!memoryEndpointsConfigured) {
 }
 
 export const options = {
+  ...diagnosticOptions,
   scenarios: {
     memory_pressure: {
       executor: 'constant-vus',
@@ -23,16 +25,18 @@ export const options = {
       duration: __ENV.MEMORY_DURATION || '10m',
     },
   },
-  thresholds: memoryThresholds,
+  thresholds: withStopThresholds(memoryThresholds),
 };
 
 export default function () {
   const endpoint = appendCacheBuster(pickEndpoint(endpoints));
   const response = http.get(buildUrl(targetUrl, endpoint), {
     timeout: requestTimeout,
+    responseType: 'binary',
     tags: { endpoint: endpoint.split('?')[0] },
   });
-  const bodyLength = response.body ? response.body.length : 0;
+  recordResponseSize(response, endpoint);
+  const bodyLength = response.body ? response.body.byteLength : 0;
 
   if (minResponseBytes > 0 && __VU === 1 && __ITER < 3 && bodyLength < minResponseBytes) {
     console.warn(`Memory endpoint response is only ${bodyLength} bytes. Configure MEMORY_ENDPOINTS to hit RAM-heavy endpoints.`);

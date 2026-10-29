@@ -1,3 +1,4 @@
+import { diagnosticOptions, recordResponseSize } from '../config/diagnostics.js';
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { getTargetUrl, buildUrl } from '../config/endpoints.js';
@@ -9,6 +10,7 @@ const requestTimeout = __ENV.REQUEST_TIMEOUT || '5s';
 const sleepSeconds = Number(__ENV.SLEEP_SECONDS || '1');
 
 export const options = {
+  ...diagnosticOptions,
   vus: Number(__ENV.SMOKE_VUS || '1'),
   duration: __ENV.SMOKE_DURATION || '30s',
   thresholds: smokeThresholds,
@@ -17,7 +19,11 @@ export const options = {
 export default function () {
   const response = http.get(buildUrl(targetUrl, '/'), {
     timeout: requestTimeout,
+    responseType: 'binary',
+    tags: { endpoint: '/' },
   });
+
+  recordResponseSize(response, '/');
 
   check(response, {
     'root endpoint returns 2xx or 3xx': (res) => res.status >= 200 && res.status < 400,

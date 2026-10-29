@@ -15,7 +15,7 @@ failed_profiles=()
 
 for profile in ${normalized_profiles}; do
   case "${profile}" in
-    throughput|cpu|memory|network|capacity)
+    throughput|cpu|memory|network|capacity|benchmark)
       if [ "${allow_high_impact}" != "true" ]; then
         echo "Skipping ${profile}: set ALLOW_HIGH_IMPACT_TESTS=true in .env to allow high-impact profiles."
         continue

@@ -1,8 +1,9 @@
+import { diagnosticOptions, recordResponseSize } from '../config/diagnostics.js';
 import http from 'k6/http';
 import { check } from 'k6';
 import { appendCacheBuster, buildUrl, getEnvEndpoints, getTargetUrl, pickEndpoint } from '../config/endpoints.js';
 import { buildSummary } from '../config/report.js';
-import { cpuThresholds } from '../config/thresholds.js';
+import { cpuThresholds, withStopThresholds } from '../config/thresholds.js';
 
 const targetUrl = getTargetUrl();
 const endpoints = getEnvEndpoints('CPU_ENDPOINTS', __ENV.LOAD_ENDPOINTS || '/');
@@ -32,6 +33,7 @@ if (noConnectionReuse) {
 }
 
 export const options = {
+  ...diagnosticOptions,
   scenarios: {
     cpu_pressure: {
       executor: 'ramping-arrival-rate',
@@ -42,15 +44,18 @@ export const options = {
     },
   },
   noConnectionReuse,
-  thresholds: cpuThresholds,
+  thresholds: withStopThresholds(cpuThresholds),
 };
 
 export default function () {
   const endpoint = appendCacheBuster(pickEndpoint(endpoints));
   const response = http.get(buildUrl(targetUrl, endpoint), {
     timeout: requestTimeout,
+    responseType: 'binary',
     tags: { endpoint: endpoint.split('?')[0] },
   });
+
+  recordResponseSize(response, endpoint);
 
   check(response, {
     'server responded': (res) => res.status > 0,

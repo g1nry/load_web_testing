@@ -153,6 +153,16 @@ profile_duration_seconds() {
       step_duration="$(duration_to_seconds "${CAPACITY_STEP_DURATION:-${CAPACITY_HOLD_DURATION:-1m}}")"
       printf "%s\n" "$((steps * step_duration))"
       ;;
+    benchmark)
+      local steps ramp hold warmup soak down
+      steps="$(capacity_steps_count "${BENCHMARK_RATE_STEPS:-50,100,200,400,600}")"
+      ramp="$(duration_to_seconds "${BENCHMARK_RAMP_DURATION:-20s}")"
+      hold="$(duration_to_seconds "${BENCHMARK_HOLD_DURATION:-2m}")"
+      warmup="$(duration_to_seconds "${BENCHMARK_WARMUP_DURATION:-20s}")"
+      soak="$(duration_to_seconds "${BENCHMARK_SOAK_DURATION:-5m}")"
+      down="$(duration_to_seconds "${BENCHMARK_RAMP_DOWN_DURATION:-30s}")"
+      printf "%s\n" "$((warmup + steps * (ramp + hold) + soak + down))"
+      ;;
     *)
       printf "0\n"
       ;;
@@ -199,6 +209,9 @@ profile_endpoints_var() {
     capacity)
       printf "CAPACITY_ENDPOINTS\n"
       ;;
+    benchmark)
+      printf "BENCHMARK_ENDPOINTS\n"
+      ;;
     *)
       printf "LOAD_ENDPOINTS\n"
       ;;
@@ -209,6 +222,11 @@ profile_endpoints() {
   local profile="$1"
   local var_name
   local value
+
+  if [ "${profile}" = "benchmark" ]; then
+    printf "%s\n" "${BENCHMARK_ENDPOINTS:-/}"
+    return
+  fi
 
   var_name="$(profile_endpoints_var "${profile}")"
   value="${!var_name:-}"
@@ -229,6 +247,9 @@ profile_request_timeout() {
       ;;
     network)
       printf "%s\n" "${NETWORK_REQUEST_TIMEOUT:-${REQUEST_TIMEOUT:-10s}}"
+      ;;
+    benchmark)
+      printf "%s\n" "${BENCHMARK_REQUEST_TIMEOUT:-5s}"
       ;;
     *)
       printf "%s\n" "${REQUEST_TIMEOUT:-10s}"
@@ -282,7 +303,7 @@ endpoint_audit_should_fail_on_status() {
   local profile="$1"
 
   case "${profile}" in
-    throughput|cpu|memory|network|capacity)
+    throughput|cpu|memory|network|capacity|benchmark)
       return 0
       ;;
     *)
@@ -316,13 +337,18 @@ audit_profile_endpoints() {
   local network_payload_bytes="${NETWORK_PAYLOAD_BYTES:-0}"
   local payload_file=""
   local audit_retries="${ENDPOINT_AUDIT_RETRIES:-1}"
+  local redirect_args=(-L)
+
+  if [ "${profile}" = "benchmark" ]; then
+    redirect_args=()
+  fi
 
   if [ -z "${target_url}" ]; then
     return
   fi
 
   case "${profile}" in
-    throughput|cpu|memory|network|capacity)
+    throughput|cpu|memory|network|capacity|benchmark)
       ;;
     *)
       return
@@ -368,9 +394,9 @@ audit_profile_endpoints() {
       tmp_file="$(mktemp)"
       set +e
       if [ -n "${payload_file}" ]; then
-        curl_output="$(curl -sS -L -X POST --data-binary "@${payload_file}" -H "Content-Type: ${NETWORK_CONTENT_TYPE:-text/plain}" -o "${tmp_file}" -w "%{http_code} %{size_download} %{time_total}" --max-time "${curl_timeout}" "${url}" 2>/dev/null)"
+        curl_output="$(curl -sS "${redirect_args[@]}" -X POST --data-binary "@${payload_file}" -H "Content-Type: ${NETWORK_CONTENT_TYPE:-text/plain}" -o "${tmp_file}" -w "%{http_code} %{size_download} %{time_total}" --max-time "${curl_timeout}" "${url}" 2>/dev/null)"
       else
-        curl_output="$(curl -sS -L -o "${tmp_file}" -w "%{http_code} %{size_download} %{time_total}" --max-time "${curl_timeout}" "${url}" 2>/dev/null)"
+        curl_output="$(curl -sS "${redirect_args[@]}" -o "${tmp_file}" -w "%{http_code} %{size_download} %{time_total}" --max-time "${curl_timeout}" "${url}" 2>/dev/null)"
       fi
       local curl_status=$?
       set -e
@@ -385,7 +411,7 @@ audit_profile_endpoints() {
 
       rm -f "${tmp_file}"
 
-      if [ "${http_code}" -ge 200 ] && [ "${http_code}" -lt 400 ]; then
+      if [ "${http_code}" -ge 200 ] && [ "${http_code}" -lt 400 ] && { [ "${profile}" != "benchmark" ] || [ "${http_code}" -lt 300 ]; }; then
         break
       fi
 
@@ -398,7 +424,7 @@ audit_profile_endpoints() {
 
     printf "  %-22s %-6s %-10s %-8s %s\n" "${endpoint}" "${http_code}" "${size_download}" "${attempt}/${audit_retries}" "${time_total}s"
 
-    if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 400 ]; then
+    if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 400 ] || { [ "${profile}" = "benchmark" ] && [ "${http_code}" -ge 300 ]; }; then
       bad_status_count=$((bad_status_count + 1))
     fi
 
@@ -521,47 +547,165 @@ run_k6_profile() {
   local report_file
   local log_file
   local expected_duration
+  local metrics_file
+  local intervals_file
+  local endpoints_file
+  local endpoint_intervals_file
+  local diagnostics_file
+  local config_file
+  local phases_file
+  local runner_file
+  local probe_file
+  local run_file
+  local result_base
+  local run_id
+  local observer_pid=""
+  local probe_endpoint=""
+  local observer_args=()
+  local python_bin=""
   local k6_pid
   local k6_status
+  local log_start_line
 
-  mkdir -p results
   load_env
 
-  timestamp="$(date +%Y%m%d-%H%M%S)"
-  started_at="$(date +%Y-%m-%dT%H:%M:%S%z)"
-  result_file="results/${profile}-${timestamp}.json"
-  report_file="results/${profile}-${timestamp}.md"
-  log_file="results/${profile}-${timestamp}.log"
+  if [ "${profile}" = "benchmark" ]; then
+    export BENCHMARK_TARGET_URL="${BENCHMARK_TARGET_URL:-http://127.0.0.1:8080}"
+    export TARGET_URL="${BENCHMARK_TARGET_URL}"
+  fi
+
+  case "${profile}" in
+    smoke|discovery|throughput|cpu|memory|network|capacity|benchmark) ;;
+    *) printf "Unknown profile: %s\n" "${profile}" >&2; return 1 ;;
+  esac
+
+  if ! [[ "${REPORT_INTERVAL_SECONDS:-10}" =~ ^[1-9][0-9]*$ ]]; then
+    printf "REPORT_INTERVAL_SECONDS must be a positive integer.\n" >&2
+    return 1
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python_bin="python3"
+  elif command -v python >/dev/null 2>&1; then
+    python_bin="python"
+  fi
+
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  run_id="${profile}-${timestamp}-$$"
+  result_base="results/${profile}"
+  mkdir -p "${result_base}/json" "${result_base}/jsonl" "${result_base}/csv" "${result_base}/md" "${result_base}/log"
+  result_file="${result_base}/json/${run_id}.summary.json"
+  diagnostics_file="${result_base}/json/${run_id}.diagnostics.json"
+  config_file="${result_base}/json/${run_id}.config.json"
+  phases_file="${result_base}/csv/${run_id}.phases.csv"
+  run_file="${result_base}/json/${run_id}.run.json"
+  report_file="${result_base}/md/${run_id}.md"
+  log_file="${result_base}/log/${run_id}.log"
+  metrics_file="${result_base}/jsonl/${run_id}.points.jsonl"
+  runner_file="${result_base}/jsonl/${run_id}.runner.jsonl"
+  probe_file="${result_base}/jsonl/${run_id}.probes.jsonl"
+  intervals_file="${result_base}/csv/${run_id}.intervals.csv"
+  endpoints_file="${result_base}/csv/${run_id}.endpoints.csv"
+  endpoint_intervals_file="${result_base}/csv/${run_id}.endpoint-intervals.csv"
 
   export K6_PROFILE="${profile}"
   export K6_SCRIPT="${script}"
-  export K6_STARTED_AT="${started_at}"
   export K6_SUMMARY_JSON="${result_file}"
   export K6_SUMMARY_MARKDOWN="${report_file}"
+  export K6_RUN_CONFIG_JSON="${config_file}"
 
-  print_banner "${profile}" "${script}" "${result_file}" "${report_file}"
-  audit_profile_endpoints "${profile}"
-
+  print_banner "${profile}" "${script}" "${result_file}" "${report_file}" | tee "${log_file}"
+  # Validate local scope before preflight curl can issue any HTTP request.
+  if [ "${profile}" = "benchmark" ] && ! k6 inspect --include-system-env-vars "${script}" > /dev/null 2>> "${log_file}"; then
+    cat "${log_file}"
+    return 1
+  fi
   expected_duration="$(profile_duration_seconds "${profile}")"
+  if [ -n "${python_bin}" ]; then
+    if [ "${ENABLE_DIAGNOSTIC_PROBE:-true}" = "true" ]; then
+      probe_endpoint="${DIAGNOSTIC_PROBE_ENDPOINT:-/}"
+    fi
+    observer_args=(
+      --finished-file "${run_file}" --runner-file "${runner_file}" --probe-file "${probe_file}"
+      --target "${TARGET_URL:-}" --endpoint "${probe_endpoint}"
+      --interval "${DIAGNOSTIC_PROBE_INTERVAL_SECONDS:-5}"
+      --timeout "${DIAGNOSTIC_PROBE_TIMEOUT_SECONDS:-3}"
+      --limit-ms "${DIAGNOSTIC_PROBE_LIMIT_MS:-2000}"
+      --recovery-seconds "${RECOVERY_OBSERVATION_SECONDS:-60}"
+      --healthy-count "${RECOVERY_HEALTHY_SAMPLES:-3}"
+      --max-seconds "$((expected_duration + 1200))"
+    )
+    if ! "${python_bin}" scripts/observe-run.py --pid 0 --validate-only "${observer_args[@]}" >> "${log_file}" 2>&1; then
+      cat "${log_file}"
+      return 1
+    fi
+  fi
+  if ! audit_profile_endpoints "${profile}" 2>&1 | tee -a "${log_file}"; then
+    printf "Endpoint audit failed. Log: %s\n" "${log_file}" >&2
+    return 1
+  fi
+
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  export K6_STARTED_AT="${started_at}"
+  export K6_RUN_ID="${run_id}"
+  export K6_RUN_METADATA="${run_file}"
+  log_start_line="$(wc -l < "${log_file}")"
 
   k6 run \
     --address "127.0.0.1:0" \
     --quiet \
     --summary-export "${result_file}" \
-    "${script}" > "${log_file}" 2>&1 &
+    --out "json=${metrics_file}" \
+    "${script}" >> "${log_file}" 2>&1 &
 
   k6_pid=$!
+  trap 'if [ -n "${k6_pid:-}" ]; then kill "${k6_pid}" 2>/dev/null || true; fi; if [ -n "${observer_pid:-}" ]; then kill "${observer_pid}" 2>/dev/null || true; fi' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [ -n "${python_bin}" ]; then
+    "${python_bin}" scripts/observe-run.py --pid "${k6_pid}" "${observer_args[@]}" >> "${log_file}" 2>&1 &
+    observer_pid=$!
+  fi
   show_progress "${k6_pid}" "${expected_duration}"
 
   set +e
   wait "${k6_pid}"
   k6_status=$?
   set -e
+  k6_pid=""
 
-  ended_at="$(date +%Y-%m-%dT%H:%M:%S%z)"
+  ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '{"profile":"%s","run_id":"%s","load_started_at":"%s","load_ended_at":"%s","k6_exit_code":%s}\n' \
+    "${profile}" "${run_id}" "${started_at}" "${ended_at}" "${k6_status}" > "${run_file}"
+  # The observer tolerates a partially written completion file and retries it.
+  if [ -n "${observer_pid}" ]; then
+    printf "Collecting post-load availability observations...\n"
+    wait "${observer_pid}" || printf "Diagnostic observer failed; see the run log.\n" >> "${log_file}"
+    observer_pid=""
+  fi
+  if [ ! -f "${report_file}" ]; then
+    printf '# k6 Test Report: %s\n\nNo k6 summary was produced. Exit code: %s. See the run log.\n' "${profile}" "${k6_status}" > "${report_file}"
+  fi
+  if [ -f "${metrics_file}" ]; then
+    if [ -n "${python_bin}" ]; then
+      if ! "${python_bin}" scripts/analyze-metrics.py "${metrics_file}" "${intervals_file}" "${report_file}" "${REPORT_INTERVAL_SECONDS:-10}" \
+        --endpoints-csv "${endpoints_file}" --endpoint-intervals-csv "${endpoint_intervals_file}" \
+        --diagnostics-json "${diagnostics_file}" --runner-samples "${runner_file}" \
+        --probe-samples "${probe_file}" --run-metadata "${run_file}" \
+        --summary-json "${result_file}" --benchmark-config "${config_file}" \
+        --phases-csv "${phases_file}" >> "${log_file}" 2>&1; then
+        printf "Time-series analysis failed; raw samples remain in %s\n" "${metrics_file}" >> "${log_file}"
+        printf "\n## Time-series analysis unavailable\n\nAnalysis failed; see the run log. Raw samples: %s\n" "${metrics_file}" >> "${report_file}"
+      fi
+    else
+      printf "Python not found; raw samples remain in %s\n" "${metrics_file}" >> "${log_file}"
+      printf "\n## Time-series analysis unavailable\n\nPython was not found. Raw samples: %s\n" "${metrics_file}" >> "${report_file}"
+    fi
+  fi
   append_prometheus_metrics "${report_file}" "${started_at}" "${ended_at}"
 
-  cat "${log_file}"
+  tail -n "+$((log_start_line + 1))" "${log_file}"
+  printf "\nRun: %s\nReport: %s\nDiagnostics: %s\n" "${run_id}" "${report_file}" "${diagnostics_file}"
 
+  trap - EXIT INT TERM
   return "${k6_status}"
 }

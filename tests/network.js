@@ -1,8 +1,9 @@
+import { diagnosticOptions, recordResponseSize } from '../config/diagnostics.js';
 import http from 'k6/http';
 import { check } from 'k6';
 import { appendCacheBuster, buildUrl, getEnvEndpoints, getTargetUrl, pickEndpoint } from '../config/endpoints.js';
 import { buildSummary } from '../config/report.js';
-import { networkThresholds } from '../config/thresholds.js';
+import { networkThresholds, withStopThresholds } from '../config/thresholds.js';
 
 const targetUrl = getTargetUrl();
 const networkEndpointsConfigured = Boolean(__ENV.NETWORK_ENDPOINTS);
@@ -10,10 +11,14 @@ const endpoints = getEnvEndpoints('NETWORK_ENDPOINTS', __ENV.LOAD_ENDPOINTS || '
 const requestTimeout = __ENV.NETWORK_REQUEST_TIMEOUT || __ENV.REQUEST_TIMEOUT || '15s';
 const minResponseBytes = Number(__ENV.NETWORK_MIN_RESPONSE_BYTES || '10240');
 const method = (__ENV.NETWORK_METHOD || 'GET').toUpperCase();
+if (!['GET', 'POST'].includes(method)) {
+  throw new Error('NETWORK_METHOD must be GET or POST');
+}
 const payloadBytes = Number(__ENV.NETWORK_PAYLOAD_BYTES || '0');
 const payload = payloadBytes > 0 ? 'x'.repeat(payloadBytes) : null;
 const params = {
   timeout: requestTimeout,
+  responseType: 'binary',
   tags: {},
 };
 
@@ -28,6 +33,7 @@ if (!networkEndpointsConfigured) {
 }
 
 export const options = {
+  ...diagnosticOptions,
   scenarios: {
     network_pressure: {
       executor: 'constant-arrival-rate',
@@ -38,7 +44,7 @@ export const options = {
       maxVUs: Number(__ENV.NETWORK_MAX_VUS || '1000'),
     },
   },
-  thresholds: networkThresholds,
+  thresholds: withStopThresholds(networkThresholds),
 };
 
 export default function () {
@@ -50,7 +56,8 @@ export default function () {
   const response = method === 'POST'
     ? http.post(buildUrl(targetUrl, endpoint), payload || '', requestParams)
     : http.get(buildUrl(targetUrl, endpoint), requestParams);
-  const bodyLength = response.body ? response.body.length : 0;
+  recordResponseSize(response, endpoint, method);
+  const bodyLength = response.body ? response.body.byteLength : 0;
 
   if (__VU === 1 && __ITER < 3 && bodyLength < minResponseBytes) {
     console.warn(`Network endpoint response is only ${bodyLength} bytes. Configure NETWORK_ENDPOINTS to hit large-response endpoints.`);

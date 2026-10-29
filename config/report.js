@@ -47,6 +47,9 @@ function formatMbps(bytesPerSecond) {
 }
 
 function durationSeconds(data) {
+  if (data.state && Number.isFinite(data.state.testRunDurationMs)) {
+    return data.state.testRunDurationMs / 1000;
+  }
   const httpRate = value(data, 'http_reqs', 'rate');
   const httpCount = value(data, 'http_reqs', 'count');
 
@@ -83,7 +86,7 @@ function thresholdOk(data, metricName) {
   const entries = Object.values(thresholds);
 
   if (entries.length === 0) {
-    return true;
+    return null;
   }
 
   return entries.every((threshold) => threshold.ok);
@@ -128,7 +131,8 @@ function capacitySteps(data) {
       const p95 = value(data, durationMetric, 'p(95)', NaN);
       const dropped = value(data, droppedMetric, 'count', 0);
       const requestCount = value(data, requestsMetric, 'count', NaN);
-      const actualRps = value(data, requestsMetric, 'rate', NaN);
+      // k6 summary rates use the entire test duration, not the scenario duration.
+      // Do not present this value as a per-step throughput.
       const failedOk = thresholdOk(data, failedMetric);
       const p95Ok = thresholdOk(data, durationMetric);
       const droppedOk = thresholdOk(data, droppedMetric);
@@ -139,8 +143,9 @@ function capacitySteps(data) {
         p95,
         dropped,
         requestCount,
-        actualRps,
-        stable: failedOk && p95Ok && droppedOk,
+        stable: requestCount > 0 && Number.isFinite(failureRate) && Number.isFinite(p95)
+          && failedOk !== null && p95Ok !== null && droppedOk !== null
+          ? failedOk && p95Ok && droppedOk : null,
       };
     });
 }
@@ -149,13 +154,7 @@ function buildCapacityAnalysis(data) {
   const profile = __ENV.K6_PROFILE || '';
 
   if (profile !== 'capacity') {
-    return `## Capacity / Failure Threshold Notes
-
-- Last stable load: TODO
-- First failing load: TODO
-- Failure criterion: TODO
-- Evidence: TODO
-`;
+    return '';
   }
 
   const steps = capacitySteps(data);
@@ -174,6 +173,9 @@ function buildCapacityAnalysis(data) {
   let firstFailing = null;
 
   for (const step of steps) {
+    if (step.stable === null) {
+      break;
+    }
     if (step.stable) {
       lastStable = step;
       continue;
@@ -184,18 +186,20 @@ function buildCapacityAnalysis(data) {
   }
 
   const rows = steps
-    .map((step) => `| ${step.rateTarget} | ${formatNumber(step.actualRps)} | ${formatCount(step.requestCount)} | ${formatPercent(step.failureRate)} | ${formatMs(step.p95)} | ${formatCount(step.dropped)} | ${step.stable ? 'stable' : 'unstable'} |`)
+    .map((step) => `| ${step.rateTarget} | ${formatCount(step.requestCount)} | ${formatPercent(step.failureRate)} | ${formatMs(step.p95)} | ${formatCount(step.dropped)} | ${step.stable === null ? 'no data' : step.stable ? 'stable' : 'unstable'} |`)
     .join('\n');
 
   return `## Capacity / Failure Threshold Notes
 
 - Last stable load: ${lastStable ? `${lastStable.rateTarget} RPS` : 'none'}
-- First failing load: ${firstFailing ? `${firstFailing.rateTarget} RPS` : 'not reached'}
+- First failing load: ${firstFailing ? `${firstFailing.rateTarget} RPS` : steps.some((step) => step.stable === null) ? 'undetermined (missing samples)' : 'not reached'}
 - Failure criterion: per-step http failure rate, p95 latency and dropped iterations thresholds
-- Evidence: see per-step table below
+- Evidence: see per-step table below. Target RPS is scheduled iterations, not measured peak throughput.
+- Dropped iterations indicate the generator could not start all scheduled work; this alone does not prove a server failure.
+- Overlapping graceful stops can mix traffic from adjacent steps.
 
-| Target RPS | Actual RPS | Requests | Failure rate | p95 latency | Dropped iterations | Status |
-| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Target RPS | Requests | Failure rate | p95 latency | Dropped iterations | Status |
+| ---: | ---: | ---: | ---: | ---: | --- |
 ${rows}
 `;
 }
@@ -230,8 +234,36 @@ function scenarioSummary(data) {
   return __ENV.K6_PROFILE || 'default';
 }
 
-function buildMarkdown(data) {
-  const profile = __ENV.K6_PROFILE || 'unknown';
+function markdownValue(raw) {
+  return String(raw).replace(/\|/g, '\\|').replace(/[\r\n]/g, ' ');
+}
+
+function benchmarkPlan(config) {
+  if (!config || config.profile !== 'benchmark') return '';
+  const rows = config.phases.map((phase) => `| ${phase.name} | ${phase.kind} | ${phase.duration} | ${phase.startRate} | ${phase.targetRate} |`).join('\n');
+  return `## Local Benchmark Configuration
+
+| Field | Value |
+| --- | --- |
+| Run label | ${markdownValue(config.labels.run)} |
+| Server CPU label | ${markdownValue(config.labels.serverCPU)} |
+| Server memory label | ${markdownValue(config.labels.serverMemory)} |
+| Server configuration label | ${markdownValue(config.labels.serverConfig)} |
+| Generator location label | ${markdownValue(config.labels.generatorLocation)} |
+| Planned duration | ${config.plannedDurationSeconds} s plus graceful stop |
+| Preallocated / maximum VUs | ${config.preAllocatedVUs} / ${config.maxVUs} |
+| Stop failure rate / p95 / evaluation delay | ${config.stopCriteria.failureRate} / ${config.stopCriteria.p95Ms} ms / ${config.stopCriteria.delay} |
+
+Resource labels are supplied by the operator; this runner does not apply or verify server resource limits. A separate generator avoids competing with the server for CPU and network resources. Endpoint order is repeated round-robin; duplicate paths act as integer weights. Redirects are not followed.
+
+| Phase | Kind | Duration | From target RPS | To target RPS |
+| --- | --- | --- | ---: | ---: |
+${rows}
+`;
+}
+
+function buildMarkdown(data, config) {
+  const profile = (config && config.profile) || __ENV.K6_PROFILE || 'unknown';
   const script = __ENV.K6_SCRIPT || 'unknown';
   const startedAt = __ENV.K6_STARTED_AT || 'unknown';
   const summaryJson = __ENV.K6_SUMMARY_JSON || 'unknown';
@@ -250,12 +282,13 @@ function buildMarkdown(data) {
 | Field | Value |
 | --- | --- |
 | Profile | ${profile} |
+| Run ID | ${__ENV.K6_RUN_ID || 'not configured'} |
 | Script | ${script} |
 | Started at | ${startedAt} |
-| Target URL | ${__ENV.TARGET_URL || 'not provided'} |
-| Endpoints | ${endpointList()} |
-| Request timeout | ${__ENV.REQUEST_TIMEOUT || 'default'} |
-| Sleep between iterations | ${__ENV.SLEEP_SECONDS || 'default'} |
+| Target URL | ${(config && config.target) || __ENV.TARGET_URL || 'not provided'} |
+| Endpoints | ${config ? markdownValue(config.endpoints.join(', ')) : endpointList()} |
+| Request timeout | ${(config && config.requestTimeout) || (profile === 'network' ? __ENV.NETWORK_REQUEST_TIMEOUT : profile === 'memory' ? __ENV.MEMORY_REQUEST_TIMEOUT : '') || __ENV.REQUEST_TIMEOUT || 'default'} |
+| Sleep between iterations | ${config ? 'arrival-rate paced' : __ENV.SLEEP_SECONDS || 'default'} |
 | Scenarios | ${scenarioSummary(data)} |
 | JSON summary | ${summaryJson} |
 | Markdown report | ${summaryMarkdown} |
@@ -267,7 +300,9 @@ function buildMarkdown(data) {
 | --- | ---: |
 | Duration | ${formatNumber(duration, 2)} s |
 | HTTP requests | ${formatCount(value(data, 'http_reqs', 'count'))} |
-| Average RPS | ${formatNumber(value(data, 'http_reqs', 'rate'))} |
+| Average completed HTTP requests/s (whole run) | ${formatNumber(value(data, 'http_reqs', 'rate', NaN))} |
+| Peak RPS | Not available from summary; requires time-series data |
+| Dropped iterations | ${formatCount(value(data, 'dropped_iterations', 'count', 0))} |
 | Iterations | ${formatCount(value(data, 'iterations', 'count'))} |
 | Checks passed | ${formatCount(value(data, 'checks', 'passes'))} |
 | Checks failed | ${formatCount(value(data, 'checks', 'fails'))} |
@@ -277,11 +312,12 @@ function buildMarkdown(data) {
 
 | Metric | Value |
 | --- | ---: |
-| Average | ${formatMs(value(data, 'http_req_duration', 'avg'))} |
-| Median | ${formatMs(value(data, 'http_req_duration', 'med'))} |
-| p90 | ${formatMs(value(data, 'http_req_duration', 'p(90)'))} |
-| p95 | ${formatMs(value(data, 'http_req_duration', 'p(95)'))} |
-| Max | ${formatMs(value(data, 'http_req_duration', 'max'))} |
+| Average | ${formatMs(value(data, 'http_req_duration', 'avg', NaN))} |
+| Median | ${formatMs(value(data, 'http_req_duration', 'med', NaN))} |
+| p90 | ${formatMs(value(data, 'http_req_duration', 'p(90)', NaN))} |
+| p95 | ${formatMs(value(data, 'http_req_duration', 'p(95)', NaN))} |
+| p99 | ${formatMs(value(data, 'http_req_duration', 'p(99)', NaN))} |
+| Max | ${formatMs(value(data, 'http_req_duration', 'max', NaN))} |
 
 ## Network From k6 Runner
 
@@ -293,24 +329,17 @@ function buildMarkdown(data) {
 | Avg receive rate | ${formatBytes(receivedRate)}/s (${formatMbps(receivedRate)}) |
 | Combined avg network rate | ${formatBytes(totalNetworkRate)}/s (${formatMbps(totalNetworkRate)}) |
 
+Counts include HTTP requests from redirects; average RPS covers the entire run, including ramp-down and graceful stop. A failure threshold is not proof of a site outage.
+
+Network totals are k6 client-side transfer counters, not response body sizes or server interface counters.
+
 ## Thresholds
 
 ${failedThresholds.length === 0 ? '- All configured thresholds passed.' : failedThresholds.map((item) => `- Failed: ${item}`).join('\n')}
 
-## Server-Side Metrics To Fill From Grafana
-
-| Metric | Value / Link |
-| --- | --- |
-| Grafana time range | TODO |
-| CPU usage peak | TODO |
-| Memory usage peak | TODO |
-| Network receive peak | TODO |
-| Network transmit peak | TODO |
-| Container restarts / OOM | TODO |
-| 5xx / timeout correlation | TODO |
-| Notes | TODO |
-
 ${buildCapacityAnalysis(data)}
+
+${benchmarkPlan(config)}
 `;
 }
 
@@ -334,14 +363,18 @@ Client-side summary:
 `;
 }
 
-export function buildSummary(data) {
-  const markdown = buildMarkdown(data);
+export function buildSummary(data, config) {
+  const markdown = buildMarkdown(data, config);
   const output = {
     stdout: buildStdoutSummary(data),
   };
 
   if (__ENV.K6_SUMMARY_MARKDOWN) {
     output[__ENV.K6_SUMMARY_MARKDOWN] = markdown;
+  }
+
+  if (config && __ENV.K6_RUN_CONFIG_JSON) {
+    output[__ENV.K6_RUN_CONFIG_JSON] = JSON.stringify(config, null, 2);
   }
 
   return output;
