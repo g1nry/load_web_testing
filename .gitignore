@@ -1,5 +1,6 @@
 .env
 results/
+reports/
 docs/
 *.log
 node_modules/
