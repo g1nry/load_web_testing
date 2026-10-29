@@ -1,10 +1,11 @@
 export const defaultEndpoints = [
   '/',
-  '/ping',
-  '/healthz',
-  '/readyz',
-  '/version',
-  '/metrics',
+  '/support',
+  '/settings',
+  '/home',
+  '/wiki',
+  '/shop',
+  '/tournaments'
 ];
 
 export function getTargetUrl() {

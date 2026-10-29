@@ -1,8 +1,9 @@
+import { diagnosticOptions, recordResponseSize } from '../config/diagnostics.js';
 import http from 'k6/http';
 import { check } from 'k6';
 import { appendCacheBuster, buildUrl, getEnvEndpoints, getTargetUrl, pickEndpoint } from '../config/endpoints.js';
 import { buildSummary } from '../config/report.js';
-import { capacityThresholds } from '../config/thresholds.js';
+import { capacityThresholds, withStopThresholds } from '../config/thresholds.js';
 
 const targetUrl = getTargetUrl();
 const endpoints = getEnvEndpoints('CAPACITY_ENDPOINTS', __ENV.LOAD_ENDPOINTS || '/');
@@ -118,8 +119,9 @@ function getCapacityThresholds() {
 }
 
 export const options = {
+  ...diagnosticOptions,
   scenarios: getCapacityScenarios(),
-  thresholds: getCapacityThresholds(),
+  thresholds: withStopThresholds(getCapacityThresholds()),
 };
 
 export default function () {
@@ -127,8 +129,11 @@ export default function () {
 
   const response = http.get(buildUrl(targetUrl, endpoint), {
     timeout: requestTimeout,
+    responseType: 'binary',
     tags: { endpoint: endpoint.split('?')[0] },
   });
+
+  recordResponseSize(response, endpoint);
 
   check(response, {
     'server responded': (res) => res.status > 0,

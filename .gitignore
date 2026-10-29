@@ -1,5 +1,6 @@
 .env
 results/
+reports/
 docs/
 *.log
 node_modules/
@@ -8,3 +9,4 @@ node_modules/
 .idea/
 .vscode/
 __pycache__/
+.tools/
